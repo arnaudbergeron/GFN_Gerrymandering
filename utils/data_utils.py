@@ -2,6 +2,7 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import geopandas as gpd
+from shapely.geometry import shape
 
 def load_raw_data(path):
 
@@ -11,7 +12,17 @@ def load_raw_data(path):
 
     # Flatten the JSON structure into a DataFrame
     df = pd.json_normalize(data)
-    return df
+
+    # Add geometry column
+    df['geometry'] = df.apply(
+        lambda row: {"type": row["geometry.type"], "coordinates": row["geometry.coordinates"]},
+        axis=1
+    )
+    df['geometry'] = df['geometry'].apply(shape)
+
+    # Create a GeoDataFrame
+    gdf = gpd.GeoDataFrame(df, geometry='geometry')
+    return gdf
 
 
 def visualize_map_with_geometry(df, geometry_col, district_id_col, state):
