@@ -28,6 +28,7 @@ https://alarm-redist.org/fifty-states/PA_cd_2020/
 
 We use the data or Pennsylvania like in the reference paper.
 
+The data has been extracted and saved in json format using jsonlite in R.
 
 ## Methodology
 
