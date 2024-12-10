@@ -19,16 +19,17 @@ repo_url = "https://github.com/alarm-redist/redist.git"
 repo_name = "redist"
 data_dir = Path("./data")
 
-# Clone the GitHub repository
-subprocess.run(["git", "clone", repo_url], check=True)
+if not data_dir.exists():
+    # Clone the GitHub repository
+    subprocess.run(["git", "clone", repo_url], check=True)
 
-# Move the `data` directory from the cloned repository
-source_path = Path(repo_name) / "data"
-if source_path.exists():
-    shutil.move(str(source_path), str(data_dir))
-    print(f"Moved {source_path} to {data_dir}")
-else:
-    print(f"Data directory not found in {source_path}")
+    # Move the `data` directory from the cloned repository
+    source_path = Path(repo_name) / "data"
+    if source_path.exists():
+        shutil.move(str(source_path), str(data_dir))
+        print(f"Moved {source_path} to {data_dir}")
+    else:
+        print(f"Data directory not found in {source_path}")
 
 import os
 import subprocess

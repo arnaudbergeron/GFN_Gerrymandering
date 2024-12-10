@@ -1,0 +1,105 @@
+<h1 id="pennsylvania-congressional-districts">2020 Pennsylvania
+Congressional Districts</h1>
+<h2 id="redistricting-requirements">Redistricting requirements</h2>
+<p>In Pennsylvania, there are few formal districting requirements, but
+districts must generally:</p>
+<ol type="1">
+<li>be contiguous</li>
+<li>have equal populations</li>
+<li>be geographically compact</li>
+<li>preserve county and municipality boundaries as much as possible</li>
+</ol>
+<h3 id="algorithmic-constraints">Algorithmic Constraints</h3>
+<p>We enforce a maximum population deviation of 0.5%. We apply a
+county/municipality constraint, as described below.</p>
+<h2 id="data-sources">Data Sources</h2>
+<p>Data for Pennsylvania comes from the ALARM Project’s <a
+href="https://alarm-redist.github.io/posts/2021-08-10-census-2020/">2020
+Redistricting Data Files</a>.</p>
+<h2 id="pre-processing-notes">Pre-processing Notes</h2>
+<p>No manual pre-processing decisions were necessary.</p>
+<h2 id="simulation-notes">Simulation Notes</h2>
+<p>We sample 10,000 districting plans for Pennsylvania across two runs
+of the SMC algorithm, then filter down to 5,000 total plans. To balance
+county and municipality splits, we create pseudocounties for use in the
+county constraint. These are counties, outside of Allegheny County,
+Montgomery County, and Philadelphia County. Within Allegheny County,
+Montgomery County, and Philadelphia County, each municipality is its own
+pseudocounty as well. These counties were chosen since they are
+necessarily split by congressional districts. We also apply an
+additional Gibbs constraint to further avoid splitting
+municipalities.</p>
+<h2 id="contents">Contents</h2>
+<ul>
+<li><code>PA_cd_2020_stats.csv</code> contains summary statistics on the
+sampled redistricting plans</li>
+<li><code>PA_cd_2020_plans.rds</code> is a compressed
+<code>redist_plans</code> object, which contains the matrix of
+precinct/block assignments and may be used for further analysis.</li>
+<li><code>PA_cd_2020_map.rds</code> is a compressed
+<code>redist_map</code> object, which contains the precinct/block
+shapefile and demographic data.</li>
+</ul>
+<p>Both the <code>redist_plans</code> and <code>redist_map</code> object
+are intended to be used with the <a
+href="https://alarm-redist.github.io/redist/">redist package</a>.</p>
+<h3 id="codebook-for-summary-statistics">Codebook for summary
+statistics</h3>
+<ul>
+<li><code>draw</code>: unique identifier for each sample. Non-numeric
+draw names are real-world plans, e.g., <code>cd_2010</code> for an
+enacted 2010 plan.</li>
+<li><code>district</code>: a district identifier. District numbers
+roughly match those in the enacted plan, but the correspondence is not
+perfect.</li>
+<li><code>chain</code>: a number identifying the run of the
+redistricting algorithm used to produce this draw. Used for diagnostic
+purposes.</li>
+<li><code>pop_overlap</code>: a number indicating the fraction of people
+in this plan who reside in the same-numbered district in the enacted
+plan.</li>
+<li><code>total_pop</code>: the total population of each district.</li>
+<li><code>total_vap</code>: the total voting-aged population of each
+district.</li>
+<li><code>pop_*</code>, <code>vap_*</code>: total (voting-aged)
+population within racial and ethnic groups for each district. Variable
+codes documented <a
+href="https://github.com/alarm-redist/census-2020#data-format">here</a>.</li>
+<li><code>plan_dev</code>: the maximum population deviation among
+districts in the plan. Computed as
+<code>max(abs(distr_pop - target_pop)/target_pop)</code>.</li>
+<li><code>comp_edge</code>: compactness, as measured by the fraction of
+internal edges kept. Higher values indicate more compactness.</li>
+<li><code>comp_polsby</code>: compactness, as measured by the
+Polsby-Popper score. Higher values indicate more compactness.</li>
+<li><code>county_splits</code>: the number of counties which belong to
+more than one district.</li>
+<li><code>muni_splits</code>: the number of Census Designated Places
+which belong to more than one district.</li>
+<li><code>*_##_dem_*</code>, <code>*_##_rep_*</code>: vote counts for
+statewide Democratic and Republican candidates in a certain election.
+More information <a
+href="https://github.com/alarm-redist/census-2020#data-format">here</a>.</li>
+<li><code>adv_##</code>, <code>arv_##</code>: average vote counts for
+statewide Democratic and Republican candidates in a certain year. More
+information <a
+href="https://github.com/alarm-redist/census-2020#data-format">here</a>.</li>
+<li><code>ndv</code>, <code>nrv</code>: averages of the
+<code>adv_##</code> and <code>arv_##</code> variables across all
+available elections.</li>
+<li><code>ndshare</code>: normal Democratic share, computed as
+<code>ndv / (ndv + nrv)</code></li>
+<li><code>e_dvs</code>: average Democratic vote share, computed as the
+average of the Democratic vote share when first scored under each
+statewide election.</li>
+<li><code>pr_dem</code>: probability seat is represented by a Democrat;
+calculated as the fraction of statewide elections under which the
+district had a majority Democratic share.</li>
+<li><code>e_dem</code>: expected number of Democratic seats for the
+plan; equivalent to summing the <code>pr_dem</code> values across
+districts</li>
+<li><code>pbias</code>: partisan bias at 50% vote share, averaged across
+all available elections. Positive values indicate Republican bias.</li>
+<li><code>egap</code>: the efficiency gap, averaged across all available
+elections. Positive values indicate Republican bias.</li>
+</ul>
