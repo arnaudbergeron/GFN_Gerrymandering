@@ -1,25 +1,55 @@
 # GFlowNets - Automatic Redistricting to Solve Gerrymandering
 
+## TODO:
+
+- [ ] make actions work (with hard contiguity constraints)
+  - [ ] start from empty district plan (num_districts initiated) then add one node at a time
+  - [ ] OR change district nb of one node; then percolate boundary for adjacent nodes
+- [ ] make a full trajectory without reward
+- [ ] implement contiguity constraints on trajectory
+- [ ] implement population constraints probability (less probable to change
+      if the action leads to very unequal populations amongst districts
+- [ ] implement reward (population, 50%-50% split share of votes matching
+      elected seats)
+
 ## Sections
-- [GFlowNets - Automatic Redistricting to Solve Gerrymandering](#gflownets---automatic-redistricting-to-solve-gerrymandering)
-  - [Sections](#sections)
-  - [Introduction](#introduction)
-  - [Problem](#problem)
-  - [Data](#data)
-  - [Methodology](#methodology)
-  - [Results](#results)
-  - [Conclusion](#conclusion)
-  - [References](#references)
-  - [Contributors](#contributors)
-  - [License](#license)
+
+- [Introduction](#introduction)
+- [Problem](#problem)
+- [Data](#data)
+- [Methodology](#methodology)
+- [Results](#results)
+- [Conclusion](#conclusion)
+- [References](#references)
+- [Contributors](#contributors)
+- [License](#license)
 
 ## Introduction
 
-Gerrymandering is the practice of manipulating the boundaries of an electoral constituency to favor one party or class. This project aims to reduce the impact of gerrymandering by creating a tool that can be used to draw fair and unbiased electoral districts. The tool will use Generative Flow Networks (GFNs) to generate a set of possible district boundaries that are both contiguous and compact. The tool will also use a set of fairness metrics to evaluate the generated districts and select the most fair and unbiased districting plan.
+Gerrymandering is the practice of manipulating the boundaries of an electoral
+constituency to favor one party or class. This project aims to reduce the impact
+of gerrymandering by creating a automatic simulation tool that can be used to
+draw fair and unbiased electoral districts.
 
 ## Problem
 
-The problem of gerrymandering is a significant issue in the United States. The goal of this project is to create a tool that can be used to draw fair and unbiased electoral districts that represent the interests of all voters.
+Current Markov Chain Monte Carlo implementations (Fifield 2020) are too
+expensive to run on large states like Pennsylvania. Our automatic
+redistricting tool will use Generative Flow Networks (GFNs) to generate a set
+of possible district boundaries that are both contiguous and compact and
+then "select" the most fair and unbiased redistricting plan based on specific
+constraints.
+
+Markov Chain Monte Carlo (MCMC) Sampling is inefficient, especially with the
+parallel tempering for Markov Chains on the temperature of the Gibbs
+distribution approximation.
+
+Generative Flow Networks (GNFs) should solve this issue by providing a more
+efficient and scalable approach to generating and evaluating potential
+districting plans. Unlike MCMC methods, GFNs leverage directed acyclic graphs
+(DAGs) to model the sequential generation process of district boundaries,
+allowing for faster convergence and better handling of complex constraints
+such as contiguity and compactness.
 
 ## Data
 
@@ -34,14 +64,28 @@ The data has been extracted and saved in json format using jsonlite in R.
 
 MCMC Sampling + Generative Flow Networks
 
+GFNs ressources:
+
+- https://milayb.notion.site/The-GFlowNet-Tutorial-95434ef0e2d94c24aab90e69b30be9b3
+- https://arxiv.org/abs/2111.09266
+
+Torchgfn:
+
+- https://github.com/Ben-Rapkin-Oberlin/gflownet_for_FS/blob/main/first_approach/env.py
+- https://github.com/d-tiapkin/gflownet-rl/tree/main
+- https://github.com/GFNOrg/torchgfn
+- https://github.com/GFNOrg/torchgfn/tree/6f132a869902584c06b7f8054e76dda696d78c94
+
 ## Results
 
 ## Conclusion
 
 ## References
+
 - [Automated Redistricting Simulation Using Markov Chain Monte Carlo](https://imai.fas.harvard.edu/research/files/redist.pdf)
 
 ## Contributors
+
 - [Alex Maggioni](alex.maggioni@mila.quebec)
 - [Arnaud Bergeron](arnaud.bergeron@mila.quebec)
 - [Kevin Lessard](kevin.lessard@mila.quebec)
