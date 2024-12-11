@@ -5,9 +5,7 @@ import geopandas as gpd
 from shapely.geometry import shape, Point, box
 from math import atan2, radians, sin, cos, pi
 
-
 def load_raw_data(path):
-
     # Read JSON raw file
     with open(path, 'r') as file:
         data = json.load(file)
@@ -15,16 +13,21 @@ def load_raw_data(path):
     # Flatten the JSON structure into a DataFrame
     df = pd.json_normalize(data)
 
-    # Add geometry column
-    df['geometry'] = df.apply(
-        lambda row: {"type": row["geometry.type"], "coordinates": row["geometry.coordinates"]},
-        axis=1
-    )
-    df['geometry'] = df['geometry'].apply(shape)
+    # Check if required columns for geometry exist
+    if "geometry.type" in df.columns and "geometry.coordinates" in df.columns:
+        # Add geometry column
+        df['geometry'] = df.apply(
+            lambda row: {"type": row["geometry.type"], "coordinates": row["geometry.coordinates"]},
+            axis=1
+        )
+        df['geometry'] = df['geometry'].apply(shape)
 
-    # Create a GeoDataFrame
-    gdf = gpd.GeoDataFrame(df, geometry='geometry')
-    return gdf
+        # Create and return a GeoDataFrame
+        gdf = gpd.GeoDataFrame(df, geometry='geometry')
+        return gdf
+
+    # Return Pandas DataFrame if geometry columns are not present
+    return df
 
 # First, add a new function to calculate required margins after box placement
 def calculate_required_margins(placed_boxes, minx, miny, maxx, maxy):
