@@ -150,8 +150,15 @@ def visualize_map_with_geometry(df, geometry_col, district_id_col, state, metric
         visualize_map_with_geometry(df, geometry_col="geometry", district_id_col="cd_2020", state="Iowa", metrics=metrics)
     ```
     """
-    # Basic setup
-    gdf = gpd.GeoDataFrame(df, geometry=df[geometry_col])
+    
+    # Check if district_id_col is a column name or an array
+    if isinstance(district_id_col, str):
+        gdf = gpd.GeoDataFrame(df, geometry=df[geometry_col])
+    else:
+        # district_id_col is assumed to be an array-like object
+        gdf = gpd.GeoDataFrame(df.copy(), geometry=df[geometry_col])
+        gdf['district_id'] = district_id_col
+        district_id_col = 'district_id'
     
     unique_districts = gdf[district_id_col].unique()
     cmap = plt.cm.get_cmap("tab20", len(unique_districts))
