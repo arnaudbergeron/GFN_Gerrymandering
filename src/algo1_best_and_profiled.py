@@ -200,15 +200,42 @@ def compactness_reward(partition, gdf, district_id_col='district', w_len_width=1
     compactness_metric = w_len_width * total_len_width_diff + w_perimeter * total_perimeter
     return np.exp(-compactness_metric)
 
+def partisan_bias_reward(partition, votes_dem, votes_rep):
+    total_votes = {dist: 0 for dist in partition.values()}
+    wasted_votes = {dist: 0 for dist in partition.values()}
+    for node, dist in partition.items():
+        dem_votes = votes_dem[node]
+        rep_votes = votes_rep[node]
+        total_votes[dist] += (dem_votes + rep_votes)
+        wasted_votes[dist] += max(dem_votes, rep_votes) - 0.5 * (dem_votes + rep_votes)
+    efficiency_gap = sum(wasted_votes.values()) / sum(total_votes.values())
+    return np.exp(-abs(efficiency_gap))  # Lower efficiency gap => Higher reward
+
+def polsby_popper_score(partition, gdf):
+    districts = set(partition.values())
+    compactness = []
+    for d in districts:
+        district_geom = unary_union(gdf.loc[gdf['district'] == d, 'geometry'])
+        area = district_geom.area
+        perimeter = district_geom.length
+        compactness.append((4 * math.pi * area) / (perimeter ** 2))
+    return np.exp(-np.std(compactness))  # Higher compactness consistency => Higher reward
+
 
 def combined_reward(partition, populations, votes_dem, votes_rep, gdf, reward_w):
+    """
+        Combines population equality, voting share, and compactness rewards with penalties.
+        """
+    # Compute individual scores
     pop_score = population_equality_reward(partition, populations)
     vote_score = voting_share_reward(partition, votes_dem, votes_rep)
-    compact_score = compactness_reward(partition, gdf)
+    compact_score = polsby_popper_score(partition, gdf)
+    bias_score = partisan_bias_reward(partition, votes_dem, votes_rep)
 
-    # Weighted sum of positive scores
-    # All components are now positive. Higher is better.
-    return (reward_w['pop'] * pop_score) + (reward_w['vote'] * vote_score) + (reward_w['compact'] * compact_score)
+    return (reward_w['pop'] * pop_score +
+            reward_w['vote'] * vote_score +
+            reward_w['compact'] * compact_score +
+            reward_w['bias'] * bias_score)
 
 
 def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_deviation=0.10, compactness_deviation=0.10):
@@ -230,7 +257,8 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
     df['node_id'] = df.index
 
     # Precompute node-level data for reward calculations
-    populations = df.set_index('node_id')['vap'].to_dict()
+    populations = df.set_index('node_id')['pop'].to_dict()
+    # populations = df.set_index('node_id')['vap'].to_dict()  # or use Voting Age Pop (VAP) for population equality
     votes_dem = df.set_index('node_id')['pre_20_dem_bid'].to_dict()
     votes_rep = df.set_index('node_id')['pre_20_rep_tru'].to_dict()
     initial_partition = df.set_index('node_id')['cd_2020'].to_dict()
@@ -246,6 +274,8 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
         """
         Compute g(π):
         g(π) = exp(-β * sum_over_districts |(pop(district)/ideal_pop - 1)|)
+
+        In the paper, they make this more efficient by computing the differences in populations.
         """
         # Aggregate district populations using defaultdict
         district_pop = defaultdict(float)
@@ -280,8 +310,12 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
     best_partition = current_partition.copy()
     best_reward = combined_reward(current_partition, populations, votes_dem, votes_rep, gdf, reward_w)
 
+    # count iterations
+    total_attempts = 0
+
     # Iterative algorithm
     while i < num_samples:
+        total_attempts += 1
         # Step 1: Determine E_on edges (Select edges in the same district with probability q)
         E_on = turn_on_edges(G, current_partition, q)
 
@@ -291,7 +325,7 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
         # Step 3: Select a subgroup of nonadjacent components along boundaries that will get swapped
         V_CP = select_nonadjacent_components(boundary_components, G, current_partition, lambda_param=lambda_param)
 
-        # Visualization before changes (optional; can slow down execution if num_samples is large)
+        # Visualization before changes (optional; can slow down execution by a lot)
         # visualize_map_with_graph_and_geometry(G, E_on, boundary_components, V_CP, df, 'district')
 
         # Step 4: Propose swaps for the selected components (random order => can cancel each other out)
@@ -299,12 +333,10 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
 
         # Step 5: Hard check for equal population constraint + geometry compactness (and maybe voting share balance later)
         max_pop_dev = max_population_deviation(proposed_partition, populations)
-        avg_compactness = max_compactness_deviation(proposed_partition, gdf)
+        max_compactness = max_compactness_deviation(proposed_partition, gdf)
         # avg_compactness = average_compactness_deviation(proposed_partition, gdf)
-        if max_pop_dev > pop_deviation or avg_compactness > compactness_deviation:
+        if max_pop_dev > pop_deviation or max_compactness > compactness_deviation:
             continue
-
-        # Polsby-Popper score for compactness: 4 * pi * area / perimeter^2
 
         # Step 6: Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings)
         if proposed_partition != current_partition and accept_or_reject_proposal(current_partition, proposed_partition,
@@ -320,14 +352,17 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
                 best_reward = proposed_reward
                 best_partition = proposed_partition
                 print(
-                    f"Iteration {i} | Avg Compacness: {avg_compactness:.6f} | New Best Reward: {proposed_reward:.6f} !!!")
+                    f"Iteration {i:03} | Max Compact dev: {max_compactness:.6f} | Curr Best: {best_reward:.6f} | New Best Reward: {proposed_reward:.6f} !!!")
             else:
-                print(f"Iteration {i} | Avg Compacness: {avg_compactness:.6f} | Proposed Reward: {proposed_reward:.6f}")
+                print(
+                    f"Iteration {i:03} | Max Compact dev:: {max_compactness:.6f} | Curr Best: {best_reward:.6f} | Proposed Reward: {proposed_reward:.6f}")
 
             # Save the current partition
             samples.append(current_partition.copy())
             i += 1
 
+    print("\nEnd of sampling")
+    print(f"Total attempts: {total_attempts} | Total samples: {len(samples)} | Ratio of accepted samples: {len(samples) / total_attempts:.2f}")
     return samples, best_partition
 
 
@@ -765,54 +800,126 @@ def accept_or_reject_proposal(current_partition, proposed_partition, V_CP, q, g_
 
     return u <= alpha
 
+import heapq
+
+def maintain_top_partitions_as_dataframe(partitions, rewards, max_samples=10, output_file=None):
+    """
+    Maintains the top partitions based on rewards and stores them in a Pandas DataFrame.
+    """
+    # Combine rewards and partitions into a DataFrame
+    df = pd.DataFrame({
+        'Reward': rewards,
+        'Partition': partitions
+    })
+
+    # Sort by reward in descending order
+    df_sorted = df.sort_values(by='Reward', ascending=False)
+
+    # Keep only the top max_samples
+    top_partitions_df = df_sorted.head(max_samples).reset_index(drop=True)
+
+    # Save the DataFrame to a file if a path is provided
+    if output_file:
+        if output_file.endswith('.csv'):
+            top_partitions_df.to_csv(output_file, index=False)
+        elif output_file.endswith('.pkl'):
+            top_partitions_df.to_pickle(output_file)
+        else:
+            raise ValueError("Unsupported file format. Use .csv or .pkl.")
+
+    return top_partitions_df
+
 
 def main():
-    random.seed(42)
-    data_path = "../data/IA_raw_data.json"
+    seeds = [42, 6162, 12345, 9999]
+    seed = random.choice(seeds)
+    random.seed(random.choice(seeds))
+    print("seed:", seed)
+    # data_path = "../data/IA_raw_data.json"
     data_path = "data/IA_raw_data.json"
     df = load_raw_data(data_path)
 
     # Convert the 'geometry' column to shapely Polygon objects (if needed)
-    df['geometry'] = df['geometry'].apply(lambda x: Polygon(x) if not isinstance(x, Polygon) else x)
+    # df['geometry'] = df['geometry'].apply(lambda x: Polygon(x) if not isinstance(x, Polygon) else x)
     df['coordinates'] = df['geometry'].apply(lambda geom: geom.centroid)  # Compute the centroid of each polygon
     df['coordinates'] = df['coordinates'].apply(lambda point: [point.x, point.y])
 
     reward_w = {
         'pop': 0.50,
-        'vote': 0.80,
-        'compact': 0.30
+        'vote': 0.30,
+        'compact': 0.20,
+        'bias': 0.50
     }
+
+    #TODO: add reset?
 
     # Run the algorithm with current parameters
     samples, best_partition = run_algorithm_1(df,  # DataFrame containing the nodes and their attributes
                                               reward_w,  # Reward weights
                                               q=0.05,  # 0.05 or 0.04 (for PA) from the paper
-                                              beta=40,  # Inverse temperature parameter
-                                              num_samples=200,  # Number of samples to generate (not total iterations)
+                                              beta=35,  # Inverse temperature parameter
+                                              num_samples=400,  # Number of samples to generate (not total iterations)
                                               lambda_param=2,  # Lambda parameter for zero-truncated Poisson dist
-                                              pop_deviation=0.07,  # Population deviation
-                                              compactness_deviation=85)  # Compactness deviation
+                                              pop_deviation=0.05,  # Population deviation
+                                              compactness_deviation=82)  # Compactness deviation
+
 
     # Reset the index and add a node_id column
     df = df.reset_index(drop=True)
     df['node_id'] = df.index
 
     # Update the DataFrame with the best partition
-    district = np.array([best_partition[node] for node in range(len(df))])
-    df['district'] = district
+    best_district = np.array([best_partition[node] for node in range(len(df))])
+    df['district'] = best_district
     gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
+
+    ##############################################################
+    # Initialize lists to store partitions and rewards
+    all_partitions = []
+    all_rewards = []
 
     # Precompute node-level data for reward calculations
     populations = df.set_index('node_id')['pop'].to_dict()
     votes_dem = df.set_index('node_id')['pre_20_dem_bid'].to_dict()
     votes_rep = df.set_index('node_id')['pre_20_rep_tru'].to_dict()
 
+    # Iterate through the samples to compute rewards and maintain top 100
+    for partition in samples:
+        reward = combined_reward(partition, populations, votes_dem, votes_rep, gdf, reward_w)
+        all_partitions.append(partition)
+        all_rewards.append(reward)
+
+    # Get the top 100 partitions with the highest rewards
+    max_samples = 20
+
+    # Maintain top partitions and save to a file
+    top_partitions_df = maintain_top_partitions_as_dataframe(
+        all_partitions,
+        all_rewards,
+        max_samples=max_samples,
+        output_file="top_partitions.csv"  # Save as a CSV file
+    )
+
+    print(top_partitions_df.head(5))
+
+    ##############################################################
+    # best
     best_reward = combined_reward(best_partition, populations, votes_dem, votes_rep, gdf, reward_w)
-    print(f"Current Reward: {best_reward:.4f}")
+    print(f"Best Reward: {best_reward:.6f}")
+
+    if best_partition == df.set_index('node_id')['cd_2020'].to_dict():
+        print("No changes made to the initial partition.")
+
+    rep_bias, efficiency_gap = compute_partisan_metrics(df, best_partition, dem_vote_col="pre_20_dem_bid",
+                                                        rep_vote_col="pre_20_rep_tru")
+
+    # Print the partisan metrics for the best partition
+    print("Republican bias:", round(rep_bias, 6))
+    print("Efficiency gap:", round(efficiency_gap, 6))
 
     # Visualize the best partition
     metrics = {
-        "total": [("vap", "Voting Age Population"), ("pop", "Total Population")],
+        "total": [("pop", "Total Population"), ("vap", "Voting Age Population")],
         "mean": [],
         "ratio": [[("pre_20_dem_bid", "Biden"), ("pre_20_rep_tru", "Trump")]]
     }
