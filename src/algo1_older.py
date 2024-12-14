@@ -1,3 +1,4 @@
+import math
 import random
 from scipy.stats import poisson
 import geopandas as gpd
@@ -12,6 +13,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
 
 from utils.data_utils import *
 
@@ -32,10 +34,10 @@ def initialize_district_color_map(unique_districts, cmap_name="tab20"):
     }
 
 
-def visualize_map_with_graph_and_geometry(G, E_on, boundary_components, df, district_id_col,
+def visualize_map_with_graph_and_geometry(G, E_on, boundary_components, V_CP, df, district_id_col,
                                           geometry_col="geometry"):
     """
-    Combines the map visualization with the graph overlay, highlighting boundary-connected nodes with inverse colors.
+    Combines the map visualization with the graph overlay, highlighting boundary and V_CP nodes.
     """
     global DISTRICT_COLOR_MAP
 
@@ -44,89 +46,105 @@ def visualize_map_with_graph_and_geometry(G, E_on, boundary_components, df, dist
     if not DISTRICT_COLOR_MAP:
         initialize_district_color_map(unique_districts)
 
-    # Set up figure with reduced margins
+    # Convert df to a GeoDataFrame
+    gdf = gpd.GeoDataFrame(df, geometry=df[geometry_col])
+    gdf['color'] = gdf[district_id_col].map(DISTRICT_COLOR_MAP)
+
+    # Set up figure
     fig, ax = plt.subplots(figsize=(15, 12))
 
     # Plot the map with districts
-    gdf = gpd.GeoDataFrame(df, geometry=df[geometry_col])
-    gdf['color'] = gdf[district_id_col].map(DISTRICT_COLOR_MAP)
     gdf.plot(ax=ax, color=gdf['color'], edgecolor='black')
 
     # Create a set for quick lookup of E_on edges
     E_on_set = {(min(u, v), max(u, v)) for u, v in E_on}
 
-    # Ensure all nodes have coordinates
+    # Extract node coordinates
     coordinates = df.set_index('node_id')['coordinates'].to_dict()
     pos = {node: coordinates.get(node, (0, 0)) for node in G.nodes()}
 
     # Partition
     partition = df.set_index('node_id')[district_id_col].to_dict()
 
-    # Map nodes to their district colors and apply inverse color for boundary nodes
-    node_color_map = []
-    for node in G.nodes():
-        if node in partition:  # Ensure the node is part of the partition
-            district_color = DISTRICT_COLOR_MAP.get(partition[node], "#CCCCCC")
-            if any(node in comp for comp in boundary_components):
-                # Calculate inverse color for boundary-connected nodes
-                r, g, b, _ = mcolors.to_rgba(district_color)
-                inverse_color = to_hex((1 - r, 1 - g, 1 - b))
-                node_color_map.append(inverse_color)
-            else:
-                node_color_map.append(district_color)
-        else:
-            node_color_map.append("#CCCCCC")  # Default color for nodes not in the partition
+    # Flatten V_CP to get all V_CP nodes
+    V_CP_nodes = {n for comp in V_CP for n in comp}
 
-    # Edge colors: white for default edges, red for E_on edges
-    edge_color_map = ['red' if (min(u, v), max(u, v)) in E_on_set else 'white' for u, v in G.edges()]
+    # Assign colors to nodes
+    node_colors = []
+    for node in G.nodes():
+        dist_id = partition.get(node, None)
+        if dist_id is not None:
+            district_color = DISTRICT_COLOR_MAP.get(dist_id, "#CCCCCC")
+
+            # Check if node is in boundary_components
+            is_boundary_node = any(node in comp for comp in boundary_components)
+
+            if is_boundary_node:
+                # Inverse color
+                r, g, b, _ = mcolors.to_rgba(district_color)
+                node_color = to_hex((1 - r, 1 - g, 1 - b))
+            else:
+                node_color = district_color
+        else:
+            # Default color if not in partition
+            node_color = "#CCCCCC"
+
+        node_colors.append(node_color)
+
+    # Edge colors
+    edge_colors = ['red' if (min(u, v), max(u, v)) in E_on_set else 'white' for u, v in G.edges()]
     edge_widths = [3 if (min(u, v), max(u, v)) in E_on_set else 2 for u, v in G.edges()]
 
-    # Overlay the graph on the map with larger nodes
-    nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_color_map, node_size=500, edgecolors='black', alpha=0.9)
-    nx.draw_networkx_edges(G, pos, ax=ax, edge_color=edge_color_map, width=edge_widths, alpha=0.8)
+    # Draw nodes and edges
+    nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colors, node_size=500, edgecolors='black', alpha=0.9)
+    nx.draw_networkx_edges(G, pos, ax=ax, edge_color=edge_colors, width=edge_widths, alpha=0.8)
     nx.draw_networkx_labels(G, pos, ax=ax, font_size=8, font_color='black')
 
-    # Add a legend in the top-right corner
+    # Overlay V_CP nodes in red to highlight them
+    if V_CP_nodes:
+        nx.draw_networkx_nodes(G, pos, nodelist=list(V_CP_nodes), node_color='red', node_size=500, edgecolors='black',
+                               alpha=1.0, ax=ax)
+
+    # Build the legend
     legend_elements = [
         Line2D([0], [0], color='red', lw=3, label='E_on edges'),
         Line2D([0], [0], color='white', lw=2, label='Other edges'),
         Patch(facecolor="#CCCCCC", edgecolor='black', label='Non-boundary nodes'),
+        Patch(facecolor="black", edgecolor='black', label='Boundary nodes (inverse color)'),
+        Patch(facecolor="red", edgecolor='black', label='V_CP nodes'),
     ]
     for district, color in DISTRICT_COLOR_MAP.items():
         legend_elements.append(Patch(facecolor=color, edgecolor='black', label=f'District {district}'))
 
-    state = df['state'][0]
+    state = df['state'].iloc[0]
     ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.0, 1.0))
     ax.set_title(f"Combined Map and Graph Visualization for {state} State", fontsize=16)
 
-    # Adjust layout to minimize white space
     plt.tight_layout(pad=1.0)
     plt.show()
 
 
 def population_equality_reward(partition, populations):
-    # Compute district populations
     districts = set(partition.values())
     district_pops = {d: 0 for d in districts}
     for node, dist in partition.items():
         district_pops[dist] += populations[node]
 
-    # Compute the ideal population
     total_pop = sum(populations.values())
-    ideal_pop = total_pop / len(districts)
+    num_districts = len(districts)
+    ideal_pop = total_pop / num_districts
 
-    # Compute sum of squared deviations from ideal
     ssd_pop = 0.0
     for dist in districts:
-        diff = district_pops[dist] - ideal_pop
-        ssd_pop += diff * diff
+        frac_dev = (district_pops[dist] / ideal_pop) - 1.0
+        ssd_pop += frac_dev * frac_dev
 
-    # Return negative of SSD for population equality
-    return -ssd_pop
+    # Transform to a positive reward using exponential
+    # Lower ssd_pop => higher reward, always > 0
+    return np.exp(-ssd_pop)
 
 
 def voting_share_reward(partition, votes_dem, votes_rep):
-    # Compute district-level vote shares
     districts = set(partition.values())
     district_dem_votes = {d: 0 for d in districts}
     district_total_votes = {d: 0 for d in districts}
@@ -135,37 +153,67 @@ def voting_share_reward(partition, votes_dem, votes_rep):
         district_dem_votes[dist] += votes_dem[node]
         district_total_votes[dist] += (votes_dem[node] + votes_rep[node])
 
-    # Compute deviation from 50% dem share
     ssd_vote = 0.0
     for dist in districts:
         if district_total_votes[dist] > 0:
             dem_share = district_dem_votes[dist] / district_total_votes[dist]
             diff = dem_share - 0.5
             ssd_vote += diff * diff
-        else:
-            # If a district has no votes at all, treat as perfectly balanced
-            # or handle differently if needed
-            pass
+        # If no votes, ssd_vote doesn't increase
 
-    # Return negative of SSD for voting share balance
-    return -ssd_vote
+    # Again, use exponential transform
+    return np.exp(-ssd_vote)
 
 
-def combined_reward(partition, populations, votes_dem, votes_rep, w_pop=1.0, w_vote=1.0):
-    # Combine both population equality and voting share balance
+def compactness_reward(partition, gdf, district_id_col='district', w_len_width=1.0, w_perimeter=1.0):
+    gdf = gdf.set_index('node_id')
+    districts = set(partition.values())
+
+    total_len_width_diff = 0.0
+    total_perimeter = 0.0
+
+    for d in districts:
+        district_nodes = [node for node, dist_id in partition.items() if dist_id == d]
+        district_geom = unary_union(gdf.loc[district_nodes, 'geometry'])
+
+        if district_geom.is_empty:
+            continue
+
+        minx, miny, maxx, maxy = district_geom.bounds
+        length = maxx - minx
+        width = maxy - miny
+        len_width_diff = abs(length - width)
+
+        perimeter = district_geom.length
+
+        total_len_width_diff += len_width_diff
+        total_perimeter += perimeter
+
+    # Use exponential transform for compactness
+    compactness_metric = w_len_width * total_len_width_diff + w_perimeter * total_perimeter
+    return np.exp(-compactness_metric)
+
+
+def combined_reward(partition, populations, votes_dem, votes_rep, gdf, reward_w):
     pop_score = population_equality_reward(partition, populations)
     vote_score = voting_share_reward(partition, votes_dem, votes_rep)
-    return w_pop * pop_score + w_vote * vote_score
+    compact_score = compactness_reward(partition, gdf)
+
+    # Weighted sum of positive scores
+    # All components are now positive. Higher is better.
+    return (reward_w['pop'] * pop_score) + (reward_w['vote'] * vote_score) + (reward_w['compact'] * compact_score)
 
 
-def run_algorithm_1(df, q, num_iterations, lambda_param=2):
+def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_deviation=0.10, compactness_deviation=0.10):
     """
-    Executes the redistricting algorithm for the specified number of iterations.
+    Executes the redistricting algorithm for the specified number of samples taken consecutively from the last accepted
+    partition. The algorithm follows the steps outlined in the paper while using an updated constraint of geometric
+    compactness for
 
     Parameters:
     - df: DataFrame containing the nodes and their attributes.
     - q: Probability threshold for turning on edges.
-    - num_iterations: Number of iterations to run the algorithm.
+    - num_samples: Number of iterations to run the algorithm.
     - lambda_param: Lambda parameter for zero-truncated Poisson distribution (used in select_nonadjacent_components).
 
     Returns:
@@ -186,61 +234,183 @@ def run_algorithm_1(df, q, num_iterations, lambda_param=2):
         for neighbor in row['adj']:  # row['adj'] should be a list of node ids adjacent to i
             G.add_edge(i, neighbor)
 
+    # Define g_func here so it can access `populations` and `beta`
+    def g_func(partition):
+        """
+        Compute g(π):
+        g(π) = exp(-β * sum_over_districts |(pop(district)/ideal_pop - 1)|)
+        """
+        district_pop = {}
+        for node, dist in partition.items():
+            district_pop[dist] = district_pop.get(dist, 0) + populations[node]
+
+        total_pop = sum(populations.values())
+        num_districts = len(set(partition.values()))
+        ideal_pop = total_pop / num_districts
+
+        deviation_sum = 0.0
+        for dist, p in district_pop.items():
+            deviation_sum += abs((p / ideal_pop) - 1)
+
+        return np.exp(-beta * deviation_sum)
+
     # Initialize the partition and store initial results for visualization
     current_partition = initial_partition.copy()
+
+    # For visualization
     district = np.array([current_partition[node] for node in range(len(df))])
     df['district'] = district
 
-    def g_func(partition):
-        """
-        Compute the unnormalized target distribution g(π).
-        Combine population equality and voting share rewards.
-        """
-        pop_score = population_equality_reward(partition, populations)
-        vote_score = voting_share_reward(partition, votes_dem, votes_rep)
-        return np.exp(pop_score + vote_score)  # Exponentiate to simulate a probability distribution
+    gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
 
     # List to store partition samples
     samples = []
+    i = 0
+
+    # Initialize best partition and reward
+    best_partition = current_partition.copy()
+    best_reward = combined_reward(current_partition, populations, votes_dem, votes_rep, gdf, reward_w)
 
     # Iterative algorithm
-    for t in range(num_iterations):
-        # Step 1: Determine E_on edges
+    while i < num_samples:
+        # Step 1: Determine E_on edges (Select edges in the same district with probability q)
         E_on = turn_on_edges(G, current_partition, q)
 
-        # Step 2: Find boundary components
+        # Step 2: Find boundary components (connected components with neighbors in different districts)
         boundary_components = find_boundary_connected_components(G, current_partition, E_on)
 
-        # Step 3: Select nonadjacent components using the updated method
+        # Step 3: Select a subgroup of nonadjacent components along boundaries that will get swapped
         V_CP = select_nonadjacent_components(boundary_components, G, current_partition, lambda_param=lambda_param)
 
-        # Step 4: Propose swaps for the selected components
+        # Visualization before changes (optional; can slow down execution if num_samples is large)
+        # visualize_map_with_graph_and_geometry(G, E_on, boundary_components, V_CP, df, 'district')
+
+        # Step 4: Propose swaps for the selected components (random order => can cancel each other out)
         proposed_partition = propose_swaps(current_partition, V_CP, G)
 
-        # Update the DataFrame with the new partition for visualization
-        district = np.array([proposed_partition[node] for node in range(len(df))])
-        df['district'] = district
+        # Step 5: Hard check for equal population constraint + geometry compactness (and maybe voting share balance later)
+        max_pop_dev = max_population_deviation(proposed_partition, populations)
+        max_compact_dev = max_compactness_deviation(proposed_partition, gdf)
+        if max_pop_dev > pop_deviation or max_compact_dev > compactness_deviation:
+            continue
 
-        # Step 5: Accept or reject the proposed partition
-        current_partition = accept_or_reject_proposal(
-            current_partition, proposed_partition, V_CP, q, g_func
-        )
+        # Polsby-Popper score for compactness: 4 * pi * area / perimeter^2
 
-        # # Step 5: Evaluate rewards
-        # current_reward = combined_reward(current_partition, populations, votes_dem, votes_rep)
-        # proposed_reward = combined_reward(proposed_partition, populations, votes_dem, votes_rep)
-        #
-        # # Step 6: Accept or reject the proposed partition
-        # if proposed_reward >= current_reward:
-        #     current_partition = proposed_partition
+        # Step 6: Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings)
+        if accept_or_reject_proposal(current_partition, proposed_partition, V_CP, q, g_func):
+            current_partition = proposed_partition
+            proposed_reward = combined_reward(current_partition, populations, votes_dem, votes_rep, gdf, reward_w)
 
-        # Step 7: Save the current partition
-        samples.append(current_partition.copy())
+            # Update the DataFrame with the new partition for visualization
+            district = np.array([proposed_partition[node] for node in range(len(df))])
+            df['district'] = district
 
-        # Visualization (optional; can slow down execution if num_iterations is large)
-        visualize_map_with_graph_and_geometry(G, E_on, boundary_components, df, 'district')
+            if proposed_reward > best_reward:
+                best_reward = proposed_reward
+                best_partition = proposed_partition
+                print(f"Iteration {i}, Best Reward: {proposed_reward:.4f}! ")
+            else:
+                print(f"Iteration {i}, Reward: {proposed_reward:.4f}")
 
-    return samples
+            # Save the current partition
+            samples.append(current_partition.copy())
+            i += 1
+
+    return samples, best_partition
+
+
+def max_population_deviation(partition, populations):
+    """
+    Compute the maximum absolute deviation of district populations from the ideal population.
+
+    Parameters:
+    - partition: dict mapping node -> district_id
+    - populations: dict mapping node -> population
+
+    Returns:
+    - max_dev: A float representing the maximum absolute fractional deviation from the ideal population.
+    """
+    # Calculate district populations
+    district_pop = {}
+    for node, dist in partition.items():
+        district_pop[dist] = district_pop.get(dist, 0) + populations[node]
+
+    total_pop = sum(populations.values())
+    num_districts = len(set(partition.values()))
+    ideal_pop = total_pop / num_districts
+
+    # Compute the maximum deviation
+    deviations = [abs((p / ideal_pop) - 1) for p in district_pop.values()]
+    max_dev = max(deviations) if deviations else 0.0
+
+    return max_dev
+
+
+def max_compactness_deviation(partition, gdf):
+    """
+    Compute the maximum compactness deviation as a percentage.
+
+    For each district:
+    - Length-width deviation: How far the bounding box differs from a square, as a fraction (0 to 1).
+      Multiply by 100 for a percentage.
+    - Perimeter deviation: Compare the district's perimeter to that of a circle with the same area.
+      (perimeter/circle_perimeter - 1)*100 gives the percentage increase.
+
+    We then combine them by averaging to get a compactness percentage deviation.
+    Finally, return the maximum such percentage among all districts.
+    """
+
+    if gdf.index.name != 'node_id':
+        gdf = gdf.set_index('node_id')
+
+    districts = set(partition.values())
+    deviations = []
+
+    for d in districts:
+        district_nodes = [node for node, dist_id in partition.items() if dist_id == d]
+        if not district_nodes:
+            continue
+
+        district_geom = unary_union(gdf.loc[district_nodes, 'geometry'])
+
+        if district_geom.is_empty:
+            continue
+
+        # Compute bounding box
+        minx, miny, maxx, maxy = district_geom.bounds
+        length = maxx - minx
+        width = maxy - miny
+
+        # Length-width deviation fraction
+        if length == 0 or width == 0:
+            # Essentially a line, 100% deviation
+            len_width_dev_percent = 100.0
+        else:
+            len_width_dev = abs(length - width) / max(length, width)
+            len_width_dev_percent = len_width_dev * 100.0
+
+        # Perimeter deviation relative to a circle
+        district_area = district_geom.area
+        district_perimeter = district_geom.length
+
+        if district_area > 0:
+            # Ideal circle perimeter for same area: P = 2 * sqrt(pi * A)
+            circle_perimeter = 2.0 * math.sqrt(math.pi * district_area)
+            perimeter_ratio = district_perimeter / circle_perimeter
+            # Percentage increase in perimeter compared to circle
+            perimeter_dev_percent = (perimeter_ratio - 1.0) * 100.0
+        else:
+            # If no area, treat as maximal deviation
+            perimeter_dev_percent = 100.0
+
+        # Combine the two percentages
+        # Here we simply average them, but you can weight them differently if you prefer
+        district_deviation_percent = (len_width_dev_percent + perimeter_dev_percent) / 2.0
+
+        deviations.append(district_deviation_percent)
+
+    max_dev = max(deviations) if deviations else 0.0
+    return max_dev
 
 
 def turn_on_edges(G, partition, q):
@@ -355,7 +525,7 @@ def select_nonadjacent_components(boundary_components, G, partition, lambda_para
     remaining_components = {frozenset(component) for component in boundary_components}
 
     while len(V_CP) < R and remaining_components:
-        C = set(random.sample(remaining_components, 1)[0])  # Randomly sample without replacement
+        C = set(random.sample(list(remaining_components), 1)[0])
         remaining_components.remove(frozenset(C))
 
         # Check if C is adjacent to any component in V_CP or causes noncontiguous districts
@@ -471,101 +641,94 @@ def find_neighboring_districts(component, partition, G):
     return list(adjacent_districts)
 
 
-def compute_acceptance_probability(current_partition, proposed_partition, V_CP, q, g_func):
+def accept_or_reject_proposal(current_partition, proposed_partition, V_CP, q, g_func):
     """
-    Computes the acceptance probability α(π', CP | π).
+    A simple Metropolis-Hastings accept/reject step.
 
     Parameters:
-    - current_partition: Current partition π (dict mapping node to district).
-    - proposed_partition: Proposed partition π'.
-    - V_CP: Set of connected components selected in Step 3.
-    - q: Probability threshold for turning on edges.
-    - g_func: Function to compute g(π), the unnormalized target distribution for sampling.
+    - current_partition: The current partition π.
+    - proposed_partition: The proposed new partition π'.
+    - V_CP: The set of selected boundary components (not used here, but kept for consistency).
+    - q: Probability threshold for turning on edges (not used directly here).
+    - g_func: A function that returns the unnormalized target probability g(π).
 
     Returns:
-    - alpha: Acceptance probability for the proposal.
+    - A partition (dict): Either the proposed_partition if accepted, or the current_partition if rejected.
     """
-    # Probability of forming V_CP in current and proposed partitions
-    q_forward = (q ** len(V_CP))
-    q_backward = (q ** len(V_CP))  # Symmetric proposal
-
-    # Compute g(π') / g(π)
     g_current = g_func(current_partition)
     g_proposed = g_func(proposed_partition)
 
+    # Compute the Metropolis-Hastings acceptance ratio
+    # Assuming symmetric proposals, ratio = g(proposed)/g(current).
     if g_current == 0:
-        return 1.0 if g_proposed > 0 else 0.0  # Handle edge cases
+        # If g_current is zero and g_proposed > 0, always accept.
+        # Otherwise, if both zero, just reject.
+        if g_proposed > 0:
+            ratio = 0
+        else:
+            ratio = 1
+    else:
+        ratio = g_proposed / g_current
 
-    g_ratio = g_proposed / g_current
+    # Acceptance probability α = min(1, ratio)
+    alpha = min(1.0, ratio)
 
-    # Compute alpha
-    alpha = min(1, (q_forward / q_backward) * g_ratio)
-    return alpha
-
-
-def accept_or_reject_proposal(current_partition, proposed_partition, V_CP, q, g_func):
-    """
-    Accept or reject the proposed partition based on the computed acceptance probability.
-
-    Parameters:
-    - current_partition: Current partition π.
-    - proposed_partition: Proposed partition π'.
-    - V_CP: Set of connected components selected in Step 3.
-    - q: Probability threshold for turning on edges.
-    - g_func: Function to compute g(π), the unnormalized target distribution for sampling.
-
-    Returns:
-    - new_partition: Accepted partition (either proposed_partition or current_partition).
-    """
-    # Compute acceptance probability
-    alpha = compute_acceptance_probability(current_partition, proposed_partition, V_CP, q, g_func)
-
-    # Sample a uniform random number u ~ U(0,1)
+    # Draw a uniform random number to decide acceptance
     u = random.random()
 
-    # Accept or reject
-    if u <= alpha:
-        return proposed_partition  # Accept the proposed partition
-    else:
-        return current_partition  # Reject the proposal and keep the current partition  # Reject the proposal and keep the current partition
+    return u <= alpha
 
 
 def main():
     random.seed(42)
-    data_path = "data/IA_raw_data.json"
+    data_path = "../data/IA_raw_data.json"
     df = load_raw_data(data_path)
-
-    # largest amount of adjacent nodes:
-    # max(list(map(len, graph.values())))
 
     # Convert the 'geometry' column to shapely Polygon objects (if needed)
     df['geometry'] = df['geometry'].apply(lambda x: Polygon(x) if not isinstance(x, Polygon) else x)
-    # Compute the centroid
-    df['centroid'] = df['geometry'].apply(lambda geom: geom.centroid)
-    df['coordinates'] = df['centroid'].apply(lambda point: [point.x, point.y])
+    df['coordinates'] = df['geometry'].apply(lambda geom: geom.centroid)  # Compute the centroid of each polygon
+    df['coordinates'] = df['coordinates'].apply(lambda point: [point.x, point.y])
 
-    # Hyperparameters
-    q = 0.05  # 0.05 or 0.04 (for PA) from the paper
-    num_iterations = 10000  #
-    lambda_param = 2
+    reward_w = {
+        'pop': 0.30,
+        'vote': 0.30,
+        'compact': 0.10
+    }
 
-    # Run the algorithm
-    samples = run_algorithm_1(df, q=q, num_iterations=num_iterations, lambda_param=lambda_param)
+    # Run the algorithm with current parameters
+    samples, best_partition = run_algorithm_1(df,  # DataFrame containing the nodes and their attributes
+                                              reward_w,  # Reward weights
+                                              q=0.05,  # 0.05 or 0.04 (for PA) from the paper
+                                              beta=40,  # Inverse temperature parameter
+                                              num_samples=100,  # Number of samples to generate (not total iterations)
+                                              lambda_param=2,  # Lambda parameter for zero-truncated Poisson dist
+                                              pop_deviation=0.10,  # Population deviation
+                                              compactness_deviation=0.6)  # Compactness deviation
 
     # Reset the index and add a node_id column
     df = df.reset_index(drop=True)
     df['node_id'] = df.index
 
-    # Precompute node-level data for the final reward calculations
+    # Update the DataFrame with the best partition
+    district = np.array([best_partition[node] for node in range(len(df))])
+    df['district'] = district
+    gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
+
+    # Precompute node-level data for reward calculations
     populations = df.set_index('node_id')['pop'].to_dict()
     votes_dem = df.set_index('node_id')['pre_20_dem_bid'].to_dict()
     votes_rep = df.set_index('node_id')['pre_20_rep_tru'].to_dict()
 
-    # Print the samples and combined rewards
-    for i, samp in enumerate(samples):
-        r = combined_reward(samp, populations, votes_dem, votes_rep)
-        if i % 1000 == 0:
-            print(f"Iteration {i}, Reward: {r:.4f}")
+    best_reward = combined_reward(best_partition, populations, votes_dem, votes_rep, gdf, reward_w)
+    print(f"Current Reward: {best_reward:.4f}")
+
+    # Visualize the best partition
+    metrics = {
+        "total": [("vap", "Voting Age Population"), ("pop", "Total Population")],
+        "mean": [],
+        "ratio": [[("pre_20_dem_bid", "Biden"), ("pre_20_rep_tru", "Trump")]]
+    }
+    visualize_map_with_geometry(df, geometry_col="geometry", district_id_col="district", state="Iowa", metrics=metrics)
 
 
 if __name__ == "__main__":
