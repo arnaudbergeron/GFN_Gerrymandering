@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import geopandas as gpd
 from shapely.geometry import shape, Point, box
 from math import atan2, radians, sin, cos, pi
+import numpy as np
 
 def load_raw_data(path):
     # Read JSON raw file
@@ -29,79 +30,139 @@ def load_raw_data(path):
     # Return Pandas DataFrame if geometry columns are not present
     return df
 
-def compute_partisan_metrics(df, district_vector, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru"):
+
+def compute_efficiency_gap(df, district_vector, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru"):
     """
-    Compute the partisan bias and efficiency gap for a given district arrangement.
+    Compute the efficiency gap given the actual election results.
 
     Args:
-        df (pd.DataFrame): Input DataFrame with vote data.
-        district_vector (list or pd.Series): Vector specifying the district index for each county.
+        df (pd.DataFrame): DataFrame with vote data.
+        district_vector (list or pd.Series): District assignments.
         dem_vote_col (str): Column name for Democratic votes.
         rep_vote_col (str): Column name for Republican votes.
 
     Returns:
-        tuple: (Republican Partisan Bias, Efficiency Gap)
-            - Partisan Bias: Positive = Republican advantage, Negative = Democratic advantage
-              (e.g., 0.1 means Republicans would win 60% of seats in a tied election)
-            - Efficiency Gap: Positive = Democratic disadvantage, Negative = Republican disadvantage
-              (e.g., 0.08 means Democrats waste 8% more votes than Republicans)
+        float: The efficiency gap.
     """
-    # Add district index to DataFrame
+    df = df.copy()
     df['district'] = district_vector
-
-    # Aggregate vote counts by districts
     district_votes = df.groupby('district')[[dem_vote_col, rep_vote_col]].sum().reset_index()
     district_votes['total_votes'] = district_votes[dem_vote_col] + district_votes[rep_vote_col]
 
-    # Calculate statewide totals
-    statewide_dem_votes = district_votes[dem_vote_col].sum()
-    statewide_rep_votes = district_votes[rep_vote_col].sum()
-    statewide_total_votes = statewide_dem_votes + statewide_rep_votes
+    statewide_total = district_votes['total_votes'].sum()
 
-    # Statewide margin (for partisan bias calculation)
-    statewide_margin = (statewide_dem_votes - statewide_rep_votes) / statewide_total_votes
-
-    # Simulate a tied statewide election (for partisan bias)
-    district_votes['adjusted_dem_share'] = (district_votes[dem_vote_col] / district_votes['total_votes']) - statewide_margin
-    district_votes['adjusted_rep_share'] = 1 - district_votes['adjusted_dem_share']
-
-    # Determine district winners in the tied scenario (for partisan bias)
-    pb_winners = district_votes.apply(
-        lambda row: 'Democrat' if row['adjusted_dem_share'] > row['adjusted_rep_share'] else 'Republican',
-        axis=1
-    )
-    
-    # Calculate seat share for partisan bias
-    seat_shares = pb_winners.value_counts(normalize=True)
-    rep_bias = seat_shares.get('Republican', 0) - 0.5
-
-    # Determine actual winners for efficiency gap
-    district_votes['winner'] = district_votes.apply(
+    district_votes['eff_gap_winner'] = district_votes.apply(
         lambda row: 'Democrat' if row[dem_vote_col] > row[rep_vote_col] else 'Republican',
         axis=1
     )
 
-    # Efficiency gap calculation
-    district_votes['threshold'] = (district_votes['total_votes'] / 2).apply(lambda x: int(x) + 1)
-    
+    # threshold = floor(total_votes/2) + 1
+    district_votes['threshold'] = (district_votes['total_votes'] // 2) + 1
+
+    # Calculate wasted votes
     district_votes['dem_wasted'] = district_votes.apply(
-        lambda row: (row[dem_vote_col] - row['threshold']) if row['winner'] == 'Democrat' 
-                   else row[dem_vote_col],
+        lambda row: (row[dem_vote_col] - row['threshold']) if row['eff_gap_winner'] == 'Democrat' else row[dem_vote_col],
         axis=1
     )
-    
+
     district_votes['rep_wasted'] = district_votes.apply(
-        lambda row: (row[rep_vote_col] - row['threshold']) if row['winner'] == 'Republican'
-                   else row[rep_vote_col],
+        lambda row: (row[rep_vote_col] - row['threshold']) if row['eff_gap_winner'] == 'Republican' else row[rep_vote_col],
         axis=1
     )
 
     total_dem_wasted = district_votes['dem_wasted'].sum()
     total_rep_wasted = district_votes['rep_wasted'].sum()
-    
-    efficiency_gap = (total_dem_wasted - total_rep_wasted) / statewide_total_votes
 
-    return rep_bias, efficiency_gap
+    efficiency_gap = (total_dem_wasted - total_rep_wasted) / statewide_total
+    return efficiency_gap
+
+
+def compute_partisan_bias(df, district_vector, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru", v=0.5):
+    """
+    Compute the partisan bias as described by the formula:
+    Partisan Bias = (Seats_D(v) - [1 - Seats_D(1-v)]) / 2
+
+    Args:
+        df (pd.DataFrame): DataFrame with vote data per unit.
+        district_vector (list or pd.Series): District assignment for each unit.
+        dem_vote_col (str): Column name for Democratic votes.
+        rep_vote_col (str): Column name for Republican votes.
+        v (float): The targeted Democratic share of the vote, default 0.5.
+
+    Returns:
+        float: The computed partisan bias measure.
+    """
+    df = df.copy()
+    df['district'] = district_vector
+    district_votes = df.groupby('district')[[dem_vote_col, rep_vote_col]].sum().reset_index()
+    district_votes['total_votes'] = district_votes[dem_vote_col] + district_votes[rep_vote_col]
+
+    # Original statewide totals
+    statewide_dem = district_votes[dem_vote_col].sum()
+    statewide_rep = district_votes[rep_vote_col].sum()
+    statewide_total = statewide_dem + statewide_rep
+    original_dem_share = statewide_dem / statewide_total
+
+    def seats_d_given_share(target_share):
+        # Adjust each district's dem share by delta so that total dem share = target_share
+        delta = target_share - original_dem_share
+
+        # Current district-level dem share
+        district_votes['dem_share'] = district_votes[dem_vote_col] / district_votes['total_votes']
+        # Adjusted dem share, clipped between 0 and 1
+        district_votes['dem_share_adj'] = (district_votes['dem_share'] + delta).clip(0, 1)
+
+        # Adjusted votes
+        district_votes['dem_votes_adj'] = district_votes['dem_share_adj'] * district_votes['total_votes']
+        district_votes['rep_votes_adj'] = (1 - district_votes['dem_share_adj']) * district_votes['total_votes']
+
+        # Count seats won by Democrats
+        dem_wins = (district_votes['dem_votes_adj'] > district_votes['rep_votes_adj']).sum()
+        total_districts = len(district_votes)
+        return dem_wins / total_districts
+
+    seats_d_at_v = seats_d_given_share(v)
+    seats_d_at_1minusv = seats_d_given_share(1 - v)
+
+    partisan_bias = (seats_d_at_v - (1 - seats_d_at_1minusv)) / 2
+    return -partisan_bias # -1 to return republican bias
+
+
+def compute_polysby_popper_compactness(df, district_vector):
+    """
+    Compute the mean Polsby-Popper compactness score for districts defined by a district vector.
+
+    Args:
+        df (gpd.GeoDataFrame): DataFrame with county geometries in the 'geometry' column.
+        district_vector (list or array): Vector of district identifiers (same length as df).
+
+    Returns:
+        float: The mean Polsby-Popper compactness score across all districts.
+    """
+    # Assign the district vector to a new column in the DataFrame
+    df = df.copy()
+    df['district'] = district_vector
+
+    # Group by the new 'district' column and create a unified geometry for each district
+    grouped = df.groupby('district')['geometry'].apply(lambda x: x.union_all()).reset_index()
+
+    # List to store compactness scores
+    compactness_scores = []
+
+    for _, row in grouped.iterrows():
+        geom = row['geometry']
+
+        # Compute the Polsby-Popper compactness score
+        area = geom.area  # District area
+        perimeter = geom.length  # District perimeter
+        score = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
+
+        # Add the score to the list
+        compactness_scores.append(score)
+
+    # Return the mean compactness score across all districts
+    return np.mean(compactness_scores) if compactness_scores else 0
+
 
 # First, add a new function to calculate required margins after box placement
 def calculate_required_margins(placed_boxes, minx, miny, maxx, maxy):
