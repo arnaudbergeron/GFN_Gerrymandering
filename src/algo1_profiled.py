@@ -1,5 +1,7 @@
 import math
 import random
+from collections import defaultdict
+
 from scipy.stats import poisson
 import geopandas as gpd
 import numpy as np
@@ -14,6 +16,9 @@ from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 from shapely.geometry import Polygon, Point
 from shapely.ops import unary_union
+
+import cProfile
+import pstats
 
 from utils.data_utils import *
 
@@ -125,6 +130,9 @@ def visualize_map_with_graph_and_geometry(G, E_on, boundary_components, V_CP, df
 
 
 def population_equality_reward(partition, populations):
+    """
+    Penalizes deviations from ideal district population quadratically.
+    """
     districts = set(partition.values())
     district_pops = {d: 0 for d in districts}
     for node, dist in partition.items():
@@ -137,11 +145,10 @@ def population_equality_reward(partition, populations):
     ssd_pop = 0.0
     for dist in districts:
         frac_dev = (district_pops[dist] / ideal_pop) - 1.0
-        ssd_pop += frac_dev * frac_dev
+        ssd_pop += frac_dev ** 2  # Quadratic penalty for population deviation
 
     # Transform to a positive reward using exponential
-    # Lower ssd_pop => higher reward, always > 0
-    return np.exp(-ssd_pop)
+    return np.exp(-ssd_pop)  # Larger deviation leads to exponentially lower rewards
 
 
 def voting_share_reward(partition, votes_dem, votes_rep):
@@ -223,7 +230,7 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
     df['node_id'] = df.index
 
     # Precompute node-level data for reward calculations
-    populations = df.set_index('node_id')['pop'].to_dict()
+    populations = df.set_index('node_id')['vap'].to_dict()
     votes_dem = df.set_index('node_id')['pre_20_dem_bid'].to_dict()
     votes_rep = df.set_index('node_id')['pre_20_rep_tru'].to_dict()
     initial_partition = df.set_index('node_id')['cd_2020'].to_dict()
@@ -240,18 +247,20 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
         Compute g(π):
         g(π) = exp(-β * sum_over_districts |(pop(district)/ideal_pop - 1)|)
         """
-        district_pop = {}
+        # Aggregate district populations using defaultdict
+        district_pop = defaultdict(float)
         for node, dist in partition.items():
-            district_pop[dist] = district_pop.get(dist, 0) + populations[node]
+            district_pop[dist] += populations[node]
 
+        # Precompute constants
         total_pop = sum(populations.values())
-        num_districts = len(set(partition.values()))
+        num_districts = len(district_pop)
         ideal_pop = total_pop / num_districts
 
-        deviation_sum = 0.0
-        for dist, p in district_pop.items():
-            deviation_sum += abs((p / ideal_pop) - 1)
+        # Compute deviation sum
+        deviation_sum = sum(abs((pop / ideal_pop) - 1) for pop in district_pop.values())
 
+        # Return g(π)
         return np.exp(-beta * deviation_sum)
 
     # Initialize the partition and store initial results for visualization
@@ -290,14 +299,16 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
 
         # Step 5: Hard check for equal population constraint + geometry compactness (and maybe voting share balance later)
         max_pop_dev = max_population_deviation(proposed_partition, populations)
-        max_compact_dev = max_compactness_deviation(proposed_partition, gdf)
-        if max_pop_dev > pop_deviation or max_compact_dev > compactness_deviation:
+        avg_compactness = max_compactness_deviation(proposed_partition, gdf)
+        # avg_compactness = average_compactness_deviation(proposed_partition, gdf)
+        if max_pop_dev > pop_deviation or avg_compactness > compactness_deviation:
             continue
 
         # Polsby-Popper score for compactness: 4 * pi * area / perimeter^2
 
         # Step 6: Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings)
-        if accept_or_reject_proposal(current_partition, proposed_partition, V_CP, q, g_func):
+        if proposed_partition != current_partition and accept_or_reject_proposal(current_partition, proposed_partition,
+                                                                                 V_CP, q, g_func):
             current_partition = proposed_partition
             proposed_reward = combined_reward(current_partition, populations, votes_dem, votes_rep, gdf, reward_w)
 
@@ -308,9 +319,10 @@ def run_algorithm_1(df, reward_w, q, beta, num_samples, lambda_param=2, pop_devi
             if proposed_reward > best_reward:
                 best_reward = proposed_reward
                 best_partition = proposed_partition
-                print(f"Iteration {i}, Best Reward: {proposed_reward:.4f}! ")
+                print(
+                    f"Iteration {i} | Avg Compacness: {avg_compactness:.6f} | New Best Reward: {proposed_reward:.6f} !!!")
             else:
-                print(f"Iteration {i}, Reward: {proposed_reward:.4f}")
+                print(f"Iteration {i} | Avg Compacness: {avg_compactness:.6f} | Proposed Reward: {proposed_reward:.6f}")
 
             # Save the current partition
             samples.append(current_partition.copy())
@@ -330,18 +342,18 @@ def max_population_deviation(partition, populations):
     Returns:
     - max_dev: A float representing the maximum absolute fractional deviation from the ideal population.
     """
-    # Calculate district populations
-    district_pop = {}
+    # Aggregate district populations
+    district_pop = defaultdict(float)
     for node, dist in partition.items():
-        district_pop[dist] = district_pop.get(dist, 0) + populations[node]
+        district_pop[dist] += populations[node]
 
+    # Precompute constants
     total_pop = sum(populations.values())
-    num_districts = len(set(partition.values()))
+    num_districts = len(district_pop)  # Equivalent to len(set(partition.values()))
     ideal_pop = total_pop / num_districts
 
-    # Compute the maximum deviation
-    deviations = [abs((p / ideal_pop) - 1) for p in district_pop.values()]
-    max_dev = max(deviations) if deviations else 0.0
+    # Compute maximum fractional deviation
+    max_dev = max(abs((p / ideal_pop) - 1) for p in district_pop.values())
 
     return max_dev
 
@@ -413,16 +425,81 @@ def max_compactness_deviation(partition, gdf):
     return max_dev
 
 
+def average_compactness_deviation(partition, gdf):
+    """
+    Compute the average compactness deviation as a percentage.
+
+    For each district:
+    - Length-width deviation: How far the bounding box differs from a square, as a fraction (0 to 1).
+      Multiply by 100 for a percentage.
+    - Perimeter deviation: Compare the district's perimeter to that of a circle with the same area.
+      (perimeter/circle_perimeter - 1)*100 gives the percentage increase.
+
+    Combine these two percentages for each district and return their average.
+    """
+    # Ensure gdf is indexed by 'node_id'
+    if gdf.index.name != 'node_id':
+        gdf = gdf.set_index('node_id')
+
+    # Precompute districts and group nodes
+    district_nodes = {}
+    for node, dist_id in partition.items():
+        if dist_id not in district_nodes:
+            district_nodes[dist_id] = []
+        district_nodes[dist_id].append(node)
+
+    deviations = []
+
+    for district, nodes in district_nodes.items():
+        # Skip empty districts
+        if not nodes:
+            continue
+
+        # Combine geometries for the district
+        district_geom = unary_union(gdf.loc[nodes, 'geometry'])
+
+        if district_geom.is_empty:
+            continue
+
+        # Compute bounding box
+        minx, miny, maxx, maxy = district_geom.bounds
+        length = maxx - minx
+        width = maxy - miny
+
+        # Length-width deviation fraction
+        len_width_dev_percent = (
+            100.0 if length == 0 or width == 0
+            else abs(length - width) / max(length, width) * 100.0
+        )
+
+        # Perimeter deviation relative to a circle
+        district_area = district_geom.area
+        district_perimeter = district_geom.length
+        if district_area > 0:
+            circle_perimeter = 2.0 * math.sqrt(math.pi * district_area)
+            perimeter_dev_percent = (district_perimeter / circle_perimeter - 1.0) * 100.0
+        else:
+            perimeter_dev_percent = 100.0
+
+        # Combine the two percentages
+        district_deviation_percent = (len_width_dev_percent + perimeter_dev_percent) / 2.0
+        deviations.append(district_deviation_percent)
+
+    # Compute average deviation
+    average_dev = sum(deviations) / len(deviations) if deviations else 0.0
+    return average_dev
+
+
 def turn_on_edges(G, partition, q):
     """
     Turns on edges that are in the same district with probability q.
     Used to make random connected components in the graph, or small sub-graphs inside a district.
     """
-    E_on = []
-    for u, v in G.edges():
-        if partition[u] == partition[v] and random.random() < q:
-            E_on.append((u, v))
-    return E_on
+    return [
+        (u, v)
+        for u, v in G.edges()
+        if partition[u] == partition[v] and random.random() < q
+    ]
 
 
 def find_boundary_connected_components(G, partition, E_on):
@@ -630,13 +707,23 @@ def find_neighboring_districts(component, partition, G):
     Returns:
     - A list of neighboring districts.
     """
-    current_district = {partition[n] for n in component}.pop()  # Current district of the component
-    adjacent_districts = set()
+    # Ensure component is a set
+    component = set(component)
 
-    for node in component:
-        for neighbor in G.neighbors(node):
-            if neighbor not in component and partition[neighbor] != current_district:
-                adjacent_districts.add(partition[neighbor])
+    # Determine the current district
+    current_district = next(iter({partition[n] for n in component}))
+
+    # Find all neighbors of nodes in the component
+    neighbors = set(
+        neighbor for node in component for neighbor in G.neighbors(node)
+    )
+
+    # Exclude nodes within the component
+    external_neighbors = neighbors - component
+
+    # Collect districts of external neighbors not in the current district
+    adjacent_districts = {partition[neighbor] for neighbor in external_neighbors
+                          if partition[neighbor] != current_district}
 
     return list(adjacent_districts)
 
@@ -682,6 +769,7 @@ def accept_or_reject_proposal(current_partition, proposed_partition, V_CP, q, g_
 def main():
     random.seed(42)
     data_path = "../data/IA_raw_data.json"
+    data_path = "data/IA_raw_data.json"
     df = load_raw_data(data_path)
 
     # Convert the 'geometry' column to shapely Polygon objects (if needed)
@@ -690,9 +778,9 @@ def main():
     df['coordinates'] = df['coordinates'].apply(lambda point: [point.x, point.y])
 
     reward_w = {
-        'pop': 0.30,
-        'vote': 0.30,
-        'compact': 0.10
+        'pop': 0.50,
+        'vote': 0.80,
+        'compact': 0.30
     }
 
     # Run the algorithm with current parameters
@@ -700,10 +788,10 @@ def main():
                                               reward_w,  # Reward weights
                                               q=0.05,  # 0.05 or 0.04 (for PA) from the paper
                                               beta=40,  # Inverse temperature parameter
-                                              num_samples=100,  # Number of samples to generate (not total iterations)
+                                              num_samples=200,  # Number of samples to generate (not total iterations)
                                               lambda_param=2,  # Lambda parameter for zero-truncated Poisson dist
-                                              pop_deviation=0.10,  # Population deviation
-                                              compactness_deviation=0.6)  # Compactness deviation
+                                              pop_deviation=0.07,  # Population deviation
+                                              compactness_deviation=85)  # Compactness deviation
 
     # Reset the index and add a node_id column
     df = df.reset_index(drop=True)
@@ -732,4 +820,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    profiler = cProfile.Profile()
+    profiler.runcall(main)
+    stats = pstats.Stats(profiler).sort_stats(pstats.SortKey.TIME)
+    stats.print_stats("algo1_profiled.py")
+    stats.dump_stats("profile_results.pstats")
