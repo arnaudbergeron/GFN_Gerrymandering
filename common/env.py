@@ -21,12 +21,11 @@ class DistrictEnv(Env):
         self.district_graph = Graph('cpu')
         self.district_graph.graph_from_json(self.json_file)
 
-        s0 = self.district_graph.state
+        s0 = self.district_graph.get_full_state()
 
         dummy_action = torch.tensor([0,0,0], device=torch.device(device_str))
         exit_action = torch.tensor([-1,-1,-1], device=torch.device(device_str))
-
-        self.action_shape_tuple = (3,)  # [vertex_id, old_district_id, new_district_id]
+        self.n_actions = (3,)  # [vertex_id, old_district_id, new_district_id]
         super().__init__(
             s0=s0,
             state_shape=s0.shape,
@@ -48,7 +47,7 @@ class DistrictEnv(Env):
         for _batch in range(states.tensor.shape[0]):
             vertex_id, old_district_id, new_district_id = actions.tensor[_batch]
             self.graphs[_batch].change_vertex_district(prescinct_id=vertex_id, new_district_id=new_district_id)
-            states.tensor[_batch] = self.graphs[_batch].state
+            states.tensor[_batch] = self.graphs[_batch].get_full_state()
 
         return states.tensor
 
@@ -63,7 +62,7 @@ class DistrictEnv(Env):
         """
         for _batch in range(states.tensor.shape[0]):
             vertex_id, old_district_id, new_district_id = actions.tensor[_batch]
-            self.graphs[_batch].change_vertex_district(prescinct_id=vertex_id, new_district_id=old_district_id)
+            self.graphs[_batch].change_vertex_district(prescinct_id=vertex_id, new_district_id=old_district_id, backward=True)
             states.tensor[_batch] = self.graphs[_batch].state
 
         return states.tensor
@@ -79,6 +78,10 @@ class DistrictEnv(Env):
             vertex_id, old_district_id, new_district_id = actions.tensor[_batch]
 
             if self.graphs[_batch].vertex_on_border.get((vertex_id, old_district_id)) is None:
+                return False
+            
+            graph_state, action_state = self.graphs[_batch].full_state_to_graph_state_taken_actions(states.tensor[_batch])
+            if action_state[vertex_id, new_district_id] == 1:
                 return False
 
         return True
@@ -128,7 +131,7 @@ class DistrictEnv(Env):
             #create all graph instances
             _graph = Graph('cpu')
             _graph.graph_from_json(self.json_file)
-            _graph.state = states.tensor[i]
+            states.tensor[i] = _graph.get_full_state()
             self.graphs.append(self.district_graph)
 
         return states
@@ -137,9 +140,16 @@ class DistrictEnv(Env):
 class DistrictPreProcessor(Preprocessor):
     """Simple preprocessor applicable to environments with uni-dimensional states.
     This is the default preprocessor used."""
+    def __init__(
+        self,
+        dim,
+    ) -> None:
+        """Initialize the preprocessor.
+        """
+        super().__init__(output_dim=dim[0])
 
     def preprocess(self, states: States) -> torch.Tensor:
         """Identity preprocessor. Returns the states as they are."""
         return (
-            states.tensor.float().flatten()
+            states.tensor.float()
         )

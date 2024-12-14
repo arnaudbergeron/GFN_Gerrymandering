@@ -17,4 +17,5 @@ from common.env import DistrictEnv
 if __name__ == "__main__":
     # 1 - We define the environment.
     environment = DistrictEnv(json_file="data/IA_raw_data.json", device_str="cpu")    # Grid of size 8x8x8x8
+    
     print(environment.reset(32).shape)  # (32, 64, 9)
