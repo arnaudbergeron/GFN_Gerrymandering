@@ -125,10 +125,10 @@ def compute_partisan_bias(df, district_vector, dem_vote_col="pre_20_dem_bid", re
     seats_d_at_1minusv = seats_d_given_share(1 - v)
 
     partisan_bias = (seats_d_at_v - (1 - seats_d_at_1minusv)) / 2
-    return -partisan_bias # -1 to return republican bias
+    return -partisan_bias # -1 to return republican bias like in the paper
 
 
-def compute_polysby_popper_compactness(df, district_vector):
+def compute_compactness(df, district_vector):
     """
     Compute the mean Polsby-Popper compactness score for districts defined by a district vector.
 
