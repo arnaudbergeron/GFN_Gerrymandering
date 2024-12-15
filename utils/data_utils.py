@@ -6,6 +6,13 @@ from shapely.geometry import shape, Point, box
 from math import atan2, radians, sin, cos, pi
 import numpy as np
 import ast
+import ipywidgets as widgets
+import seaborn as sns
+from IPython.display import display, clear_output
+
+################
+# COMPUTATIONS #
+################
 
 def load_raw_data(path):
     # Read JSON raw file
@@ -163,6 +170,104 @@ def compute_compactness(df, district_vector):
 
     # Return the mean compactness score across all districts
     return np.mean(compactness_scores) if compactness_scores else 0
+
+#################
+# VISUALIZATION #
+#################
+
+def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru"):
+    """
+    Creates an interactive plot with dropdown selection showing KDE plot and district map side by side.
+    
+    Parameters:
+    df: GeoDataFrame with district data
+    new_districts: array of new district assignments
+    dem_vote_col: column name for Democratic votes
+    rep_vote_col: column name for Republican votes
+    """
+    def create_plot(district_id):
+        # Clear previous output and recreate dropdown
+        clear_output(wait=True)
+        display(district_dropdown)
+        
+        # Extract data for the current district
+        current_district = df[df['cd_2010'] == district_id]
+        initial_indexes = list(current_district.index)
+        new_indexes = list(np.where(new_districts == district_id)[0])
+        
+        # Identify unchanged, swapped-in, and swapped-out counties
+        unchanged = set(initial_indexes).intersection(new_indexes)
+        swap_out = set(initial_indexes) - unchanged
+        swap_in = set(new_indexes) - unchanged
+        
+        # Create subsets for vote share calculations
+        unchanged_df = df.loc[list(unchanged)]
+        swap_out_df = df.loc[list(swap_out)]
+        swap_in_df = df.loc[list(swap_in)]
+        
+        # Calculate Democratic vote ratios
+        def calc_dem_ratio(subset):
+            return subset[dem_vote_col] / (subset[dem_vote_col] + subset[rep_vote_col])
+        
+        unchanged_votes = calc_dem_ratio(unchanged_df)
+        swap_out_votes = calc_dem_ratio(swap_out_df)
+        swap_in_votes = calc_dem_ratio(swap_in_df)
+        
+        # Create figure and subplots
+        fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+        
+        # KDE Plot with handling for single counties
+        if len(unchanged_votes) > 1:
+            sns.kdeplot(unchanged_votes, label='Not Swapped', color='black', ax=axes[0])
+        elif len(unchanged_votes) == 1:
+            axes[0].axvline(unchanged_votes.iloc[0], color='black', label='Not Swapped')
+            
+        if len(swap_out_votes) > 1:
+            sns.kdeplot(swap_out_votes, label='Swapped Out', color='blue', linestyle='--', ax=axes[0])
+        elif len(swap_out_votes) == 1:
+            axes[0].axvline(swap_out_votes.iloc[0], color='blue', linestyle='--', label='Swapped Out')
+            
+        if len(swap_in_votes) > 1:
+            sns.kdeplot(swap_in_votes, label='Swapped In', color='red', linestyle='-.', ax=axes[0])
+        elif len(swap_in_votes) == 1:
+            axes[0].axvline(swap_in_votes.iloc[0], color='red', linestyle='-.', label='Swapped In')
+        
+        axes[0].set_xlabel('Vote Share for Democratic Congressional Candidate')
+        axes[0].set_ylabel('Density')
+        axes[0].set_title(f'Distribution of Democratic Voteshare for District {district_id}')
+        axes[0].legend()
+        
+        # District Map
+        current_district.plot(ax=axes[1], color='white', edgecolor='black', linewidth=0.5)
+        if not swap_out_df.empty:
+            swap_out_df.plot(ax=axes[1], color='blue', label='Swapped Out')
+        if not swap_in_df.empty:
+            swap_in_df.plot(ax=axes[1], color='red', label='Swapped In')
+        
+        handles = [
+            plt.Line2D([0], [0], color='blue', lw=4, label='Swapped Out'),
+            plt.Line2D([0], [0], color='red', lw=4, label='Swapped In')
+        ]
+        axes[1].legend(handles=handles)
+        axes[1].set_title(f'Congressional District {district_id}')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    # Get unique districts and create dropdown
+    districts = sorted(df['cd_2020'].unique())
+    district_dropdown = widgets.Dropdown(
+        options=districts,
+        value=districts[0],
+        description='District:',
+        style={'description_width': 'initial'}
+    )
+    
+    # Connect the dropdown to the plot update function
+    district_dropdown.observe(lambda change: create_plot(change.new), names='value')
+    
+    # Show initial plot
+    create_plot(districts[0])
 
 
 def partisan_bias_vs_presincts_changed(initial_districts, proposed_partitions):
