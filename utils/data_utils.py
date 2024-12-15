@@ -5,6 +5,7 @@ import geopandas as gpd
 from shapely.geometry import shape, Point, box
 from math import atan2, radians, sin, cos, pi
 import numpy as np
+import ast
 
 def load_raw_data(path):
     # Read JSON raw file
@@ -163,6 +164,47 @@ def compute_compactness(df, district_vector):
     # Return the mean compactness score across all districts
     return np.mean(compactness_scores) if compactness_scores else 0
 
+
+def partisan_bias_vs_presincts_changed(initial_districts, proposed_partitions):
+    """
+    Generate a plot of partisan bias vs. percentage of precincts switched from the original district.
+
+    Args:
+        initial_districts (array-like): Initial district assignments.
+        proposed_partitions (pd.DataFrame): DataFrame with proposed partitions and rewards.
+
+    Returns:
+        None: Displays a plot.
+    """
+    initial_districts = np.array(initial_districts)
+    points = []
+
+    for row in proposed_partitions.itertuples():
+        partition = row.Partition
+        districts = np.array(list(ast.literal_eval(partition).values()))
+        diff = initial_districts != districts
+        ptg = np.sum(diff) / len(districts)  # Percentage of switched precincts
+        points.append((ptg, compute_partisan_bias(df, district_vector=districts)))
+
+    # Split points into x and y for plotting
+    x, y = zip(*points)
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    plt.scatter(x, y, color="black", s=10, alpha=0.7, label="Simulated Plans")
+    plt.axhline(0, color="red", linestyle="--", linewidth=1, label="Unbiased Plan (0 Bias)")
+    plt.axvline(0.03, color="blue", linestyle="--", linewidth=1, label="Minimal Bias Threshold (3%)")
+    
+    # Customize aesthetics
+    plt.title("Partisan Bias of Simulated Plans", fontsize=14)
+    plt.xlabel("% of Precincts Switched From Original District", fontsize=12)
+    plt.ylabel("Partisan Bias towards Democrats", fontsize=12)
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
+    plt.legend(fontsize=10, loc="upper right")
+    plt.tight_layout()
+
+    # Show the plot
+    plt.show()
 
 # First, add a new function to calculate required margins after box placement
 def calculate_required_margins(placed_boxes, minx, miny, maxx, maxy):
