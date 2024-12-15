@@ -171,6 +171,30 @@ def compute_compactness(df, district_vector):
     # Return the mean compactness score across all districts
     return np.mean(compactness_scores) if compactness_scores else 0
 
+def compute_population_variance(df, district_vector, population_col="pop"):
+    """
+    Compute the variance in the population between districts.
+
+    Args:
+        df (pd.DataFrame): DataFrame with population data.
+        district_vector (list or pd.Series): District assignments for each unit.
+        population_col (str): Column name for the population data.
+
+    Returns:
+        float: The variance in population between districts.
+    """
+    # Copy the DataFrame to avoid modifying the original
+    df = df.copy()
+    
+    # Assign districts to the DataFrame
+    df['district'] = district_vector
+    
+    # Compute the total population for each district
+    district_population = df.groupby('district')[population_col].sum()
+    
+    # Compute and return the variance in district populations
+    return district_population.var()
+
 #################
 # VISUALIZATION #
 #################
