@@ -20,7 +20,13 @@ from shapely.ops import unary_union
 import cProfile
 import pstats
 
+import os
+import sys
+
+sys.path.append(r"C:\Users\alex.maggioni\Documents\RLOC\GFN_Gerrymandering")
+
 from utils.data_utils import *
+
 
 # Create a persistent district-to-color mapping
 DISTRICT_COLOR_MAP = {}
@@ -836,7 +842,7 @@ def main():
     random.seed(random.choice(seeds))
     print("seed:", seed)
     # data_path = "../data/IA_raw_data.json"
-    data_path = "data/IA_raw_data.json"
+    data_path = "data/PA_raw_data.json"
     df = load_raw_data(data_path)
 
     # Convert the 'geometry' column to shapely Polygon objects (if needed)
@@ -856,10 +862,10 @@ def main():
     # Run the algorithm with current parameters
     samples, best_partition = run_algorithm_1(df,  # DataFrame containing the nodes and their attributes
                                               reward_w,  # Reward weights
-                                              q=0.05,  # 0.05 or 0.04 (for PA) from the paper
-                                              beta=35,  # Inverse temperature parameter
-                                              num_samples=400,  # Number of samples to generate (not total iterations)
-                                              lambda_param=2,  # Lambda parameter for zero-truncated Poisson dist
+                                              q=0.04,  # 0.05 or 0.04 (for PA) from the paper
+                                              beta=2500,  # Inverse temperature parameter
+                                              num_samples=100_000,  # Number of samples to generate (not total iterations)
+                                              lambda_param=10,  # Lambda parameter for zero-truncated Poisson dist
                                               pop_deviation=0.05,  # Population deviation
                                               compactness_deviation=82)  # Compactness deviation
 
@@ -890,7 +896,7 @@ def main():
         all_rewards.append(reward)
 
     # Get the top 100 partitions with the highest rewards
-    max_samples = 20
+    max_samples = 100
 
     # Maintain top partitions and save to a file
     top_partitions_df = maintain_top_partitions_as_dataframe(
@@ -910,8 +916,8 @@ def main():
     if best_partition == df.set_index('node_id')['cd_2020'].to_dict():
         print("No changes made to the initial partition.")
 
-    rep_bias, efficiency_gap = compute_partisan_metrics(df, best_partition, dem_vote_col="pre_20_dem_bid",
-                                                        rep_vote_col="pre_20_rep_tru")
+    rep_bias = compute_partisan_bias(df, best_partition)
+    efficiency_gap = compute_efficiency_gap(df, best_partition)
 
     # Print the partisan metrics for the best partition
     print("Republican bias:", round(rep_bias, 6))
