@@ -3,6 +3,7 @@
 data/
 redist/
 paper_source_code/
+.pstats
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
