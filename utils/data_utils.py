@@ -294,18 +294,18 @@ def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vo
     create_plot(districts[0])
 
 
-def partisan_bias_vs_presincts_changed(initial_districts, proposed_partitions):
+def partisan_bias_vs_presincts_changed(df, proposed_partitions):
     """
     Generate a plot of partisan bias vs. percentage of precincts switched from the original district.
 
     Args:
-        initial_districts (array-like): Initial district assignments.
+        df (pd.DataFrame): DataFrame containing precincts with a column `cd_2020` for initial district assignments.
         proposed_partitions (pd.DataFrame): DataFrame with proposed partitions and rewards.
 
     Returns:
         None: Displays a plot.
     """
-    initial_districts = np.array(initial_districts)
+    initial_districts = np.array(df['cd_2020'])
     points = []
 
     for row in proposed_partitions.itertuples():
@@ -334,6 +334,7 @@ def partisan_bias_vs_presincts_changed(initial_districts, proposed_partitions):
 
     # Show the plot
     plt.show()
+
 
 # First, add a new function to calculate required margins after box placement
 def calculate_required_margins(placed_boxes, minx, miny, maxx, maxy):
