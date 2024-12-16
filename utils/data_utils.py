@@ -170,7 +170,7 @@ def compute_compactness(df, district_vector):
         compactness_scores.append(score)
 
     # Return the mean compactness score across all districts
-    return np.mean(compactness_scores) if compactness_scores else 0
+    return np.mean(compactness_scores), np.std(compactness_scores)
 
 def compute_population_entropy(df, district_vector, population_col="pop"):
     """
