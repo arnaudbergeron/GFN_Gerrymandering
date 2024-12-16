@@ -18,6 +18,7 @@ from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 from shapely.geometry import Polygon, Point, MultiPolygon
 from shapely.ops import unary_union
+from numpy.random import choice
 
 import cProfile
 import pstats
@@ -869,22 +870,24 @@ def prep_data(state_abrv):
     return df
 
 
-def run_mcmc_hard(df, reward_w, q=0.04, beta=30, num_samples=200, lambda_param=2, max_pop_dev_threshold=0.05,
+def run_mcmc_soft(df, reward_w, q=0.04, beta=30,
+                  num_samples=200, m_samples=10,
+                  s_samples=5, lambda_param=2,
+                  max_pop_dev_threshold=0.05,
                   compactness_threshold=0.22):
     """
-    Algorithm 1.1 (Sampling contiguous redistricting plans with hard constraint)
+    Algorithm 1.2 (Sampling contiguous redistricting plans with soft constraint)
 
     Executes the redistricting algorithm for the specified number of samples taken consecutively from the last accepted
     partition. The algorithm follows the steps outlined in the paper while using an updated constraint of geometric
     compactness for each district since the original paper did not include this constraint but is legally required.
 
-    Algorithm 1.1:
-    1) Turn on edges in the same district with probability q.
-    2) Find boundary components (connected components with neighbors in different districts).
-    3) Select a subgroup of nonadjacent components along boundaries that will get swapped.
-    4) Propose swaps for the selected components.
-    5) Hard check for equal population constraint + geometry compactness.
-    6) Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings).
+    Difference from Algorithm 1.1:
+    - M samples for each new trajectory iteration
+    - reject samples after the Approximated Acceptance Probability
+    - Resampling using Sampling/Importance Resampling (SIR) by drawing S samples wih replacement from the M samples
+    using sampling weights 1/g_func(π) for each sample π wrt beta parameter
+
 
     Parameters:
     - df: DataFrame containing the nodes and their attributes.
@@ -941,11 +944,11 @@ def run_mcmc_hard(df, reward_w, q=0.04, beta=30, num_samples=200, lambda_param=2
         return np.exp(-beta * deviation_sum)
 
     # Initialize the partition and store initial results for visualization
+    drawn_partitions = [initial_partition.copy()]
     current_partition = initial_partition.copy()
 
     # List to store partition samples
     samples = []
-    i = 0
 
     # Initialize best partition and reward
     best_partition = current_partition.copy()
@@ -957,59 +960,61 @@ def run_mcmc_hard(df, reward_w, q=0.04, beta=30, num_samples=200, lambda_param=2
     print("\nStarting sampling...")
 
     # Iterative algorithm
-    while i < num_samples:
-        total_attempts += 1
-        # Step 1: Determine E_on edges (Select edges in the same district with probability q)
-        E_on = turn_on_edges(G, current_partition, q)
+    for i in range(num_samples):
+        temp_samples = []
+        m = 0
+        while m < m_samples:
+            current_partition = random.choice(drawn_partitions)
+            total_attempts += 1
+            # Step 1: Determine E_on edges (Select edges in the same district with probability q)
+            E_on = turn_on_edges(G, current_partition, q)
 
-        # Step 2: Find boundary components (connected components with neighbors in different districts)
-        boundary_components = find_boundary_connected_components(G, current_partition, E_on)
-        BCP_current_len = len(boundary_components)  # precompute |B(CP, π)| for acceptance probability
+            # Step 2: Find boundary components (connected components with neighbors in different districts)
+            boundary_components = find_boundary_connected_components(G, current_partition, E_on)
+            BCP_current_len = len(boundary_components)  # precompute |B(CP, π)| for acceptance probability
 
-        # Step 3: Select a subgroup of nonadjacent components along boundaries that will get swapped
-        V_CP, R = select_nonadjacent_components(boundary_components, G, current_partition, lambda_param=lambda_param)
+            # Step 3: Select a subgroup of nonadjacent components along boundaries that will get swapped
+            V_CP, R = select_nonadjacent_components(boundary_components, G, current_partition,
+                                                    lambda_param=lambda_param)
 
-        # OPTIONAL: Visualization before changes (optional; can slow down execution by a lot)
-        # visualize_map_with_graph_and_geometry(G, E_on, boundary_components, V_CP, df, current_partition)
+            # OPTIONAL: Visualization before changes (optional; can slow down execution by a lot)
+            # visualize_map_with_graph_and_geometry(G, E_on, boundary_components, V_CP, df, current_partition)
 
-        # Step 4: Propose swaps for the selected components (random order => can cancel each other out)
-        proposed_partition = propose_swaps(current_partition, V_CP, G)
+            # Step 4: Propose swaps for the selected components (random order => can cancel each other out)
+            proposed_partition = propose_swaps(current_partition, V_CP, G)
 
-        # Step 5: Hard check for equal population constraint + geometry compactness (and maybe voting share balance later)
-        max_pop_dev = max_population_deviation(proposed_partition, populations)
-        avg_compactness = compute_compactness(gdf, proposed_partition)[0]
+            # Step 5: Hard check for equal population constraint + geometry compactness (and maybe voting share balance later)
+            max_pop_dev = max_population_deviation(proposed_partition, populations)
+            avg_compactness = compute_compactness(gdf, proposed_partition)[0]
 
-        if max_pop_dev > max_pop_dev_threshold or avg_compactness < compactness_threshold:
-            continue
+            if max_pop_dev > max_pop_dev_threshold or avg_compactness < compactness_threshold:
+                continue
 
-        # Step 6: Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings)
-        if proposed_partition != current_partition and accept_or_reject_proposal(current_partition,
-                                                                                 proposed_partition,
-                                                                                 G, BCP_current_len, V_CP, R, q,
-                                                                                 lambda_param, g_func, df):
-            current_partition = proposed_partition
-            proposed_reward = combined_reward(current_partition, populations, votes_dem, votes_rep, gdf, reward_w)
+            # Step 6: Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings)
+            if proposed_partition != current_partition and accept_or_reject_proposal(current_partition,
+                                                                                     proposed_partition,
+                                                                                     G, BCP_current_len, V_CP, R, q,
+                                                                                     lambda_param, g_func, df):
+                temp_samples.append(proposed_partition.copy())
+                m += 1
 
-            # Update the DataFrame with the new partition for visualization
-            district = np.array([proposed_partition[node] for node in range(len(df))])
-            df['district'] = district
+        # resample using SIR
+        weights = [1 / g_func(partition) for partition in temp_samples]
+        # Save the current partition
+        drawn_partitions = choice(temp_samples, s_samples, p=weights, replace=True)
+        avg_compactness = np.mean([compute_compactness(gdf, proposed_partition)[0]
+                                   for proposed_partition in drawn_partitions])
+        proposed_rewards = [combined_reward(partition, populations, votes_dem, votes_rep, gdf, reward_w)
+                            for partition in drawn_partitions]
+        best_reward = max(best_reward, proposed_rewards)
+        avg_reward = np.mean(proposed_rewards)
+        avg_max_pop_dev = np.mean([max_population_deviation(partition, populations) for partition in drawn_partitions])
+        print(
+            f"Samples {i:03} | Avg Compact dev: {avg_compactness:.6f} | Avg Max pop dev: {avg_max_pop_dev}| Best Reward: {best_reward:.6f} | Avg Reward: {avg_reward:.6f}")
 
-            if proposed_reward > best_reward:
-                best_reward = proposed_reward
-                best_partition = proposed_partition
-                print(
-                    f"Sample {i:03} | Avg Compact dev: {avg_compactness:.6f} | Best Reward: {best_reward:.6f} | New Best Reward: {proposed_reward:.6f} !")
-            else:
-                print(
-                    f"Sample {i:03} | Avg Compact dev: {avg_compactness:.6f} | Best Reward: {best_reward:.6f} | Reward: {proposed_reward:.6f}")
-
-            # Save the current partition
-            samples.append(current_partition.copy())
-            i += 1
+        samples.extend(drawn_partitions)
 
     print("\nEnd of sampling")
-    print(
-        f"Total attempts: {total_attempts} | Total samples: {len(samples)} | Ratio of accepted samples: {len(samples) / total_attempts:.2f}")
     return samples, best_partition
 
 
@@ -1045,6 +1050,8 @@ def main(state_abrv="IA", seed=6162):
             "q": 0.05,
             "beta": 30,
             "num_samples": 200,
+            "m_samples": 10,
+            "s_samples": 5,
             "lambda_param": 2,
             "max_pop_dev_threshold": 0.05,
             "compactness_threshold": 0.28
@@ -1054,6 +1061,8 @@ def main(state_abrv="IA", seed=6162):
             "q": 0.06,
             "beta": 40,
             "num_samples": 100,
+            "m_samples": 10,
+            "s_samples": 5,
             "lambda_param": 2,
             "max_pop_dev_threshold": 0.08,
             "compactness_threshold": 0.20,
@@ -1063,21 +1072,26 @@ def main(state_abrv="IA", seed=6162):
             "q": 0.10,
             "beta": 30,
             "num_samples": 100,
+            "m_samples": 10,
+            "s_samples": 5,
             "lambda_param": 2,
             "max_pop_dev_threshold": 0.08,
             "compactness_threshold": 0.22
         }
     }
-    reward_w, q, beta, num_samples, lambda_param, max_pop_dev_threshold, compactness_threshold = hyperparams_dict[
-        state_abrv].values()
+    reward_w, q, beta, num_samples, m_samples, s_samples, lambda_param, max_pop_dev_threshold, compactness_threshold = \
+        hyperparams_dict[
+            state_abrv].values()
     random.seed(seed)
 
-    print(f"Running MCMC W/ HARD CONSTRAINTS for {STATE_ABBREVIATIONS[state_abrv]} with the following hyperparameters:")
+    print(f"Running MCMC W/ SOFT CONSTRAINTS for {STATE_ABBREVIATIONS[state_abrv]} with the following hyperparameters:")
     print("seed:", seed)
     print("Reward weights:", reward_w)
     print("q:", q)
     print("beta:", beta)
     print("num_samples:", num_samples)
+    print("m_samples:", m_samples)
+    print("s_samples:", s_samples)
     print("lambda_param:", lambda_param)
     print("max_pop_dev_threshold:", max_pop_dev_threshold)
     print("compactness_threshold:", compactness_threshold)
@@ -1086,11 +1100,13 @@ def main(state_abrv="IA", seed=6162):
     # Run the algorithm with and tune hyperparameters
     # The best partition is according to an unfixed reward function.
     df = prep_data(state_abrv)
-    samples, best_partition = run_mcmc_hard(df,
+    samples, best_partition = run_mcmc_soft(df,
                                             reward_w,
                                             q=q,
                                             beta=beta,
                                             num_samples=num_samples,
+                                            m_samples=m_samples,
+                                            s_samples=s_samples,
                                             lambda_param=lambda_param,
                                             max_pop_dev_threshold=max_pop_dev_threshold,
                                             compactness_threshold=compactness_threshold)

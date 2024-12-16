@@ -18,6 +18,8 @@ from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 from shapely.geometry import Polygon, Point, MultiPolygon
 from shapely.ops import unary_union
+from numpy.random import choice
+import concurrent.futures
 
 import cProfile
 import pstats
@@ -869,147 +871,192 @@ def prep_data(state_abrv):
     return df
 
 
-def run_mcmc_soft(df, reward_w, q=0.04, beta=30, num_samples=200, lambda_param=2, max_pop_dev_threshold=0.05,
-                  compactness_threshold=0.22):
+import numpy as np
+import random
+import networkx as nx
+import geopandas as gpd
+from collections import defaultdict
+from numpy.random import choice
+
+
+def run_parallel_tempering_soft(df, reward_w,
+                                q=0.04,
+                                betas=None,  # List/array of inverse temperatures [β^(0), β^(1), ..., β^(r-1)]
+                                M=10,  # Number of outer loops
+                                T=20,  # Number of iterations per chain per outer loop
+                                s_samples=5,  # SIR resampling count
+                                lambda_param=2,
+                                max_pop_dev_threshold=0.05,
+                                compactness_threshold=0.22,
+                                delta=0.05):  # population constraint δ as in the figure
     """
-    Algorithm 1.2 (Sampling contiguous redistricting plans with soft constraint)
+    Parallel tempering with soft constraint algorithm (inspired by the figure provided).
 
-    Executes the redistricting algorithm for the specified number of samples taken consecutively from the last accepted
-    partition. The algorithm follows the steps outlined in the paper while using an updated constraint of geometric
-    compactness for each district since the original paper did not include this constraint but is legally required.
+    Steps (high-level):
+    1. Generate M*T samples:
+       (a) For each chain, run T iterations of the basic algorithm (like your algorithm 1.2).
+       (b) Attempt a temperature swap between two chains (e.g. adjacent chains).
+       (c) Accept or reject temperature swap.
 
-    Difference from Algorithm 1.1:
-    - M samples for each new trajectory iteration
-    - reject samples after the Approximated Acceptance Probability
-    - Resampling using Sampling/Importance Resampling (SIR) by drawing S samples wih replacement from the M samples
-    using sampling weights 1/g_func(π) for each sample π wrt beta parameter
-
+    2. Reject samples from the target chain (β^(0)) that fail population constraint (δ).
+    3. Resample using SIR from the remaining samples of the target chain.
 
     Parameters:
-    - df: DataFrame containing the nodes and their attributes.
-    - reward_w: Dictionary containing the weights for each reward component.
-    - q: Probability threshold for turning on edges.
-    - beta: Beta parameter for the Gibbs distribution.
-    - num_samples: Number of iterations to run the algorithm.
-    - lambda_param: Lambda parameter for zero-truncated Poisson distribution (used in select_nonadjacent_components).
-    - max_pop_dev_threshold: Maximum population deviation allowed for a proposed partition.
-    - compactness_threshold: Minimum compactness score allowed for a proposed partition.
-
+    - df, reward_w: as before
+    - q, lambda_param, thresholds: as before
+    - betas: array of length r, e.g. [30, 20, 10, 0]
+    - initial_partitions: list of length r of initial partitions (dict node->district)
+    - M, T: define total iterations = M*T
+    - s_samples: number of samples to draw after SIR.
+    - delta: population constraint for filtering at the end.
 
     Returns:
-    - samples: List of partition samples after each iteration.
-    - best_partition: The partition with the highest reward acording to custom reward function.
+    - final_samples: The resampled partitions from the target chain after constraints
+    - best_partition: The best partition found according to the reward
     """
-    # Precompute node-level data for reward calculations and prepare DataFrame
+    # Ensure betas and initial partitions are provided
+    if betas is None:
+        # Example: r=3
+        betas = [30, 10, 0]  # decreasing betas
+    # If not provided, just replicate one initial partition for all chains
+    df = df.reset_index(drop=True)
+    df['node_id'] = df.index
+    initial_partition = df.set_index('node_id')['cd_2020'].to_dict()
+    initial_partitions = [initial_partition.copy() for _ in range(len(betas))]
+
+    r = len(betas)
+
+    # Precompute node-level data
     df = df.reset_index(drop=True)
     df['node_id'] = df.index
     populations = df.set_index('node_id')['pop'].to_dict()
     votes_dem = df.set_index('node_id')['pre_20_dem_bid'].to_dict()
     votes_rep = df.set_index('node_id')['pre_20_rep_tru'].to_dict()
-    initial_partition = df.set_index('node_id')['cd_2020'].to_dict()
     gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
 
     # Create a NetworkX graph
     G = nx.Graph()
-    for i, row in df.iterrows():
-        for neighbor in row['adj']:  # row['adj'] should be a list of node ids adjacent to i
-            G.add_edge(i, neighbor)
+    for idx, row in df.iterrows():
+        for neighbor in row['adj']:
+            G.add_edge(idx, neighbor)
 
-    # Define g_func here so it can access `populations` and `beta`
-    def g_func(partition):
-        """
-        Compute g(π) the Gibbs distribution unnormalized probability:
-        g(π) = exp(-β * sum_over_districts |(pop(district)/ideal_pop - 1)|)
-
-        In the paper, they make this more efficient by computing the differences in populations.
-        """
-        # Aggregate district populations using defaultdict
+    def g_func(partition, beta):
+        # Gibbs distribution unnormalized probability for given β
         district_pop = defaultdict(float)
         for node, dist in partition.items():
             district_pop[dist] += populations[node]
-
-        # Precompute constants
         total_pop = sum(populations.values())
         num_districts = len(district_pop)
         ideal_pop = total_pop / num_districts
-
-        # Compute deviation sum
-        deviation_sum = sum(abs((pop / ideal_pop) - 1) for pop in district_pop.values())
-
-        # Return g(π), the Gibbs distribution unnormalized probability
+        deviation_sum = sum(abs((p / ideal_pop) - 1) for p in district_pop.values())
         return np.exp(-beta * deviation_sum)
 
-    # Initialize the partition and store initial results for visualization
-    current_partition = initial_partition.copy()
-
-    # List to store partition samples
-    samples = []
-    i = 0
-
-    # Initialize best partition and reward
-    best_partition = current_partition.copy()
-    best_reward = combined_reward(current_partition, populations, votes_dem, votes_rep, gdf, reward_w)
-
-    # count iterations
-    total_attempts = 0
-
-    print("\nStarting sampling...")
-
-    # Iterative algorithm
-    while i < num_samples:
-        total_attempts += 1
-        # Step 1: Determine E_on edges (Select edges in the same district with probability q)
-        E_on = turn_on_edges(G, current_partition, q)
-
-        # Step 2: Find boundary components (connected components with neighbors in different districts)
-        boundary_components = find_boundary_connected_components(G, current_partition, E_on)
-        BCP_current_len = len(boundary_components)  # precompute |B(CP, π)| for acceptance probability
-
-        # Step 3: Select a subgroup of nonadjacent components along boundaries that will get swapped
-        V_CP, R = select_nonadjacent_components(boundary_components, G, current_partition, lambda_param=lambda_param)
-
-        # OPTIONAL: Visualization before changes (optional; can slow down execution by a lot)
-        # visualize_map_with_graph_and_geometry(G, E_on, boundary_components, V_CP, df, current_partition)
-
-        # Step 4: Propose swaps for the selected components (random order => can cancel each other out)
-        proposed_partition = propose_swaps(current_partition, V_CP, G)
-
-        # Step 5: Hard check for equal population constraint + geometry compactness (and maybe voting share balance later)
-        max_pop_dev = max_population_deviation(proposed_partition, populations)
-        avg_compactness = compute_compactness(gdf, proposed_partition)[0]
-
+    def is_valid_partition(partition):
+        # Check constraints: population deviation and compactness
+        max_pop_dev = max_population_deviation(partition, populations)
+        avg_compactness = compute_compactness(gdf, partition)[0]
         if max_pop_dev > max_pop_dev_threshold or avg_compactness < compactness_threshold:
-            continue
+            return False
+        return True
 
-        # Step 6: Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings)
-        if proposed_partition != current_partition and accept_or_reject_proposal(current_partition,
-                                                                                 proposed_partition,
-                                                                                 G, BCP_current_len, V_CP, R, q,
-                                                                                 lambda_param, g_func, df):
-            current_partition = proposed_partition
-            proposed_reward = combined_reward(current_partition, populations, votes_dem, votes_rep, gdf, reward_w)
+    # Initialize chains
+    chain_partitions = [p.copy() for p in initial_partitions]
+    chain_samples = [[] for _ in range(r)]  # To store accepted samples for each chain
+    chain_best_partitions = [p.copy() for p in chain_partitions]
+    chain_best_rewards = [combined_reward(p, populations, votes_dem, votes_rep, gdf, reward_w)
+                          for p in chain_partitions]
 
-            # Update the DataFrame with the new partition for visualization
-            district = np.array([proposed_partition[node] for node in range(len(df))])
-            df['district'] = district
+    print("\nStarting parallel tempering sampling...")
 
-            if proposed_reward > best_reward:
-                best_reward = proposed_reward
-                best_partition = proposed_partition
-                print(
-                    f"Sample {i:03} | Avg Compact dev: {avg_compactness:.6f} | Best Reward: {best_reward:.6f} | New Best Reward: {proposed_reward:.6f} !")
-            else:
-                print(
-                    f"Sample {i:03} | Avg Compact dev: {avg_compactness:.6f} | Best Reward: {best_reward:.6f} | Reward: {proposed_reward:.6f}")
+    # Main loop: M times
+    for m_iter in range(M):
+        # For each chain, run T iterations of the basic MCMC step
+        for t in range(T):
+            for i in range(r):
+                current_partition = chain_partitions[i]
+                # Perform one iteration of the basic step (like Algorithm 1.2)
+                # This involves:
+                # Step 1: E_on
+                E_on = turn_on_edges(G, current_partition, q)
+                # Step 2: boundary components
+                boundary_components = find_boundary_connected_components(G, current_partition, E_on)
+                BCP_current_len = len(boundary_components)
+                # Step 3: select nonadjacent comps
+                V_CP, R = select_nonadjacent_components(boundary_components, G, current_partition,
+                                                        lambda_param=lambda_param)
+                # Step 4: propose swaps
+                proposed_partition = propose_swaps(current_partition, V_CP, G)
+                # Step 5: check constraints
+                if not is_valid_partition(proposed_partition):
+                    # Not accepted, continue with next iteration
+                    continue
+                # Step 6: accept or reject
+                accepted = accept_or_reject_proposal(current_partition, proposed_partition, G, BCP_current_len, V_CP, R,
+                                                     q, lambda_param, lambda partition: g_func(partition, betas[i]), df)
+                if accepted and proposed_partition != current_partition:
+                    chain_partitions[i] = proposed_partition.copy()
+                    chain_samples[i].append(proposed_partition.copy())
+                    # Update best if needed
+                    cur_reward = combined_reward(proposed_partition, populations, votes_dem, votes_rep, gdf, reward_w)
+                    if cur_reward > chain_best_rewards[i]:
+                        chain_best_rewards[i] = cur_reward
+                        chain_best_partitions[i] = proposed_partition.copy()
 
-            # Save the current partition
-            samples.append(current_partition.copy())
-            i += 1
+        # After T steps, propose a temperature exchange between two chains
+        # For simplicity, we try to swap temperatures between adjacent chains
+        # Choose a pair (j, j+1)
+        for j in range(r - 1):
+            # Compute acceptance probability for temperature swap
+            # According to eq. (13):
+            # γ(β^(j) ⇆ β^(j+1)) = min(1, [g_{β^(j)}(π^{(j+1)}) * g_{β^(j+1)}(π^{(j)})] / [g_{β^(j)}(π^{(j)}) * g_{β^(j+1)}(π^{(j+1)})])
+            p_j = chain_partitions[j]
+            p_j1 = chain_partitions[j + 1]
+            numerator = g_func(p_j1, betas[j]) * g_func(p_j, betas[j + 1])
+            denominator = g_func(p_j, betas[j]) * g_func(p_j1, betas[j + 1])
+            gamma = min(1, numerator / denominator)
+            if random.random() < gamma:
+                # Swap temperatures
+                betas[j], betas[j + 1] = betas[j + 1], betas[j]
 
-    print("\nEnd of sampling")
-    print(
-        f"Total attempts: {total_attempts} | Total samples: {len(samples)} | Ratio of accepted samples: {len(samples) / total_attempts:.2f}")
-    return samples, best_partition
+    # After M*T total iterations, focus on the target chain (chain 0, with β^(0)):
+    # Step 2: reject samples failing population constraint from chain 0
+    valid_samples = []
+    for sample in chain_samples[0]:
+        # Check population constraint: max_{1 <= ℓ <= n} |(sum_{i∈Vℓ} p_i)/p̃ - 1| > δ
+        # Here we interpret this constraint: If the max population deviation from ideal is greater than δ, discard.
+        # We can reuse max_pop_dev for that, assuming δ matches the notion of max_pop_dev threshold.
+        # If you have a different definition, adapt here.
+        district_pop = defaultdict(float)
+        for node, dist in sample.items():
+            district_pop[dist] += populations[node]
+        total_pop = sum(populations.values())
+        num_districts = len(district_pop)
+        ideal_pop = total_pop / num_districts
+        max_dev = max(abs((p / ideal_pop) - 1) for p in district_pop.values())
+        if max_dev <= delta:
+            valid_samples.append(sample)
+
+    if len(valid_samples) == 0:
+        print("No valid samples passed the population constraint after M*T steps.")
+        # You may choose to return something else here
+        return [], chain_best_partitions[0]
+
+    # Step 3: Resample using SIR from these valid samples
+    # Weights = 1/g_{β^(0)}(π) since β^(0) = betas[0] after final swaps
+    final_beta = betas[0]
+    weights = np.array([1 / g_func(s, final_beta) for s in valid_samples])
+    weights = weights / weights.sum()
+
+    # SIR resampling
+    # s_samples partitions drawn with replacement from valid_samples
+    final_samples = np.random.choice(valid_samples, size=s_samples, p=weights, replace=True)
+
+    # Determine best partition among final_samples if desired
+    final_rewards = [combined_reward(s, populations, votes_dem, votes_rep, gdf, reward_w) for s in final_samples]
+    best_final_partition = final_samples[np.argmax(final_rewards)]
+
+    print("\nEnd of parallel tempering sampling.")
+    return list(final_samples), best_final_partition
 
 
 def main(state_abrv="IA", seed=6162):
@@ -1044,6 +1091,8 @@ def main(state_abrv="IA", seed=6162):
             "q": 0.05,
             "beta": 30,
             "num_samples": 200,
+            "m_samples": 10,
+            "s_samples": 5,
             "lambda_param": 2,
             "max_pop_dev_threshold": 0.05,
             "compactness_threshold": 0.28
@@ -1053,6 +1102,8 @@ def main(state_abrv="IA", seed=6162):
             "q": 0.06,
             "beta": 40,
             "num_samples": 100,
+            "m_samples": 10,
+            "s_samples": 5,
             "lambda_param": 2,
             "max_pop_dev_threshold": 0.08,
             "compactness_threshold": 0.20,
@@ -1062,13 +1113,16 @@ def main(state_abrv="IA", seed=6162):
             "q": 0.10,
             "beta": 30,
             "num_samples": 100,
+            "m_samples": 10,
+            "s_samples": 5,
             "lambda_param": 2,
             "max_pop_dev_threshold": 0.08,
             "compactness_threshold": 0.22
         }
     }
-    reward_w, q, beta, num_samples, lambda_param, max_pop_dev_threshold, compactness_threshold = hyperparams_dict[
-        state_abrv].values()
+    reward_w, q, beta, num_samples, m_samples, s_samples, lambda_param, max_pop_dev_threshold, compactness_threshold = \
+        hyperparams_dict[
+            state_abrv].values()
     random.seed(seed)
 
     print(f"Running MCMC W/ SOFT CONSTRAINTS for {STATE_ABBREVIATIONS[state_abrv]} with the following hyperparameters:")
@@ -1077,6 +1131,8 @@ def main(state_abrv="IA", seed=6162):
     print("q:", q)
     print("beta:", beta)
     print("num_samples:", num_samples)
+    print("m_samples:", m_samples)
+    print("s_samples:", s_samples)
     print("lambda_param:", lambda_param)
     print("max_pop_dev_threshold:", max_pop_dev_threshold)
     print("compactness_threshold:", compactness_threshold)
@@ -1084,15 +1140,18 @@ def main(state_abrv="IA", seed=6162):
 
     # Run the algorithm with and tune hyperparameters
     # The best partition is according to an unfixed reward function.
+    betas = list(range(m_samples * 5, -1, -5)) # Decreasing betas
     df = prep_data(state_abrv)
-    samples, best_partition = run_mcmc_soft(df,
-                                            reward_w,
-                                            q=q,
-                                            beta=beta,
-                                            num_samples=num_samples,
-                                            lambda_param=lambda_param,
-                                            max_pop_dev_threshold=max_pop_dev_threshold,
-                                            compactness_threshold=compactness_threshold)
+    samples, best_partition = run_parallel_tempering_soft(df,
+                                                          reward_w,
+                                                          q=q,
+                                                          betas=betas,
+                                                          num_samples=num_samples,
+                                                          m_samples=m_samples,
+                                                          s_samples=s_samples,
+                                                          lambda_param=lambda_param,
+                                                          max_pop_dev_threshold=max_pop_dev_threshold,
+                                                          compactness_threshold=compactness_threshold)
 
     # Just for main:
     # Update the DataFrame with the best partition
@@ -1130,6 +1189,7 @@ def main(state_abrv="IA", seed=6162):
     print("Compactness Mean:", round(compactness_mean, 6))
     print("Compactness std:", round(compactness_std, 6))
     print("Population variance:", round(pop_variance, 6))
+    print("Max population deviation:", round(max_population_deviation(best_partition, populations), 6))
 
     # Visualize the best partition
     metrics = {
