@@ -13,6 +13,8 @@ class Graph:
         self.max_district_id = 0
         self.state = None  # Tensor representing the current state of the graph
         self.taken_actions = None
+        self.num_county = 0
+        self.previous_state = None
         # self.state[vertex_id, 0] is the district_id of the vertex with vertex_id negative if it is on the border
         # self.state[vertex_id, 1:] is the adjacent vertices of the vertex with vertex_id
 
@@ -26,6 +28,8 @@ class Graph:
         max_adjacent_vertices = 0
 
         num_districts = df['cd_2020'].nunique()
+        self.max_district_id = num_districts
+        self.num_county = df.shape[0]
         self.taken_actions = torch.zeros((df.shape[0], num_districts), device=self.device)
         for index, row in df.iterrows():
             prescinct_id = index
@@ -45,6 +49,7 @@ class Graph:
 
         # Initialize the state tensor with zeros
         self.state = torch.zeros((len(self.vertices), max_adjacent_vertices + 1), device=self.device)
+        self.previous_state = torch.zeros((len(self.vertices)), device=self.device)
 
         # Populate the state tensor with district ids and adjacent vertices
         for vertex_id, vertex in self.vertices.items():
@@ -55,6 +60,8 @@ class Graph:
             len_adj = len(vertex.adj_vertices)
             _adj_tensor[:len_adj] = torch.tensor(list(vertex.adj_vertices), device=self.device)
             self.state[vertex_id, 1:] = _adj_tensor
+
+        self.previous_state[:] = self.state[:, 0]
 
     def get_border_vertices(self):
         """
@@ -110,6 +117,8 @@ class Graph:
             self.taken_actions[prescinct_id, new_district_id-1] = 1
         else:
             self.taken_actions[prescinct_id, old_district_id-1] = 0
+        
+        self.previous_state[prescinct_id] = old_district_id
 
     def update_border(self, vertex, adj_vertex):
         """Updates the border of the graph when a vertex changes its district.
