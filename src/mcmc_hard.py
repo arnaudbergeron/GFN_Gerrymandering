@@ -150,7 +150,7 @@ def run_mcmc_hard(df, q=0.04,
 
 # Define all hyperparameters for each state
 ALL_HYPERPARAMS_DICT = {
-    "IA": Hyperparameters(0.05, None, 1000, None, None, 2, 0.10, 0.25, True),
+    "IA": Hyperparameters(0.05, None, 10000, None, None, 2, 0.05, 0.25, True),
     "PA": Hyperparameters(0.04, None, 200, None, None, 10, 0.10, 0.05, False),
     "MA": Hyperparameters(0.10, None, 100, None, None, 2, 0.08, 0.22, True),
     "MI": Hyperparameters(0.10, None, 100, None, None, 5, 0.08, 0.22, False)
