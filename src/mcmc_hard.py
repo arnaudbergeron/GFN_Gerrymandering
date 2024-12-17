@@ -1,103 +1,12 @@
 from mcmc_utils import *
 
-# Define all hyperparameters for each state
-ALL_HYPERPARAMS_DICT = {
-    "IA": Hyperparameters(0.05, 9, 1000, 10, 5, 2, 0.10, 0.25, True),
-    "PA": Hyperparameters(0.04, 20, 200, 10, 5, 10, 0.10, 0.01, False),
-    "MA": Hyperparameters(0.10, 30, 100, 10, 5, 2, 0.08, 0.22, True),
-    "MI": Hyperparameters(0.10, 30, 100, 10, 5, 5, 0.08, 0.22, False)
-}
 
-def accept_or_reject_proposal(current_partition, proposed_partition, G, BCP_current, V_CP, R, q, lambda_param, g_func,
-                              df):
-    """
-    A simple Metropolis-Hastings accept/reject step. A new sample is proposed based on the previous sample,
-    then the proposed sample is either added to the chain or rejected based on the acceptance probability.
-
-    This approximation is valid under the assumption that we rarely reject samples drawn in Step 3(b) for adjacency or
-    shattering issues in our method "select_nonadjacent_components".
-
-    Parameters:
-    - current_partition: The current partition π.
-    - proposed_partition: The proposed new partition π'.
-    - V_CP: The set of selected boundary components (not used here, but kept for consistency).
-    - q: Probability threshold for turning on edges (not used directly here).
-    - g_func: A function that returns the unnormalized target probability g(π).
-
-    Returns:
-    - A partition (dict): Either the proposed_partition if accepted, or the current_partition if rejected.
-    """
-    # g(π) and g(π') are equal when there are no constraints in the target sampling function
-    # We sample uniformly over all contiguous partitions, so g(π) = g(π') = 1
-    g_current = 1
-    g_proposed = 1
-
-    # If both g_current and g_proposed are zero, just reject to avoid division by zero
-    if g_current == 0 and g_proposed == 0:
-        return False
-    # If g_current == 0 but g_proposed > 0, we can set ratio to something large; effectively always accept
-    if g_current == 0 and g_proposed > 0:
-        return True
-
-    # |B(CP, π)| -> Precomputed from the main loop BCP_current = |B(CP, π)|
-    # Compute |B(CP, π')|
-    E_on_proposed = turn_on_edges(G, proposed_partition, q)
-    boundary_components_proposed = find_boundary_connected_components(G, proposed_partition, E_on_proposed)
-    BCP_proposed = len(boundary_components_proposed)
-
-    # OPT Visualization before changes (optional; can slow down execution by a lot)
-    # visualize_map_with_graph_and_geometry(G, E_on_proposed, boundary_components_proposed, V_CP, df, proposed_partition)
-
-    # Compute |C(π, V_CP)|
-    C_pi_VCP = compute_swendsen_wang_cut(G, current_partition, V_CP)
-
-    # Compute |C(π', V_CP)| by counting how V_CP is structured under π'
-    C_pi_prime_VCP = compute_swendsen_wang_cut(G, proposed_partition, V_CP)
-
-    # Compute F(|B(CP, π)|) and F(|B(CP, π')|)
-    # F is the truncated Poisson pmf for the chosen R given the number of boundary components
-    F_current = truncated_poisson_pmf(R, lambda_param, BCP_current)
-    F_proposed = truncated_poisson_pmf(R, lambda_param, BCP_proposed)
-
-    # Handle cases where F_proposed = 0 (no valid R under π')
-    # This would make the ratio infinite, but min(1, ...) caps it at 1.
-    if F_proposed == 0:
-        # If it's impossible to choose R from π' scenario, ratio becomes 0.
-        ratio_F = 0.0
-    else:
-        ratio_F = F_current / F_proposed
-
-    # Compute (|B(CP, π)| / |B(CP, π')|)^R
-    # If BCP_proposed = 0, can't form any boundary components (unlikely, but check)
-    if BCP_proposed == 0:
-        boundary_ratio = 0.0
-    else:
-        boundary_ratio = (BCP_current / BCP_proposed) ** R
-
-    # Compute ( (1-q)^{|C(π',V_CP)|} / (1-q)^{|C(π,V_CP)|} ) = (1-q)^{C_pi_prime_VCP - C_pi_VCP}
-    pq_ratio = (1 - q) ** (C_pi_prime_VCP - C_pi_VCP)
-
-    # Compute g(π')/g(π)
-    if g_current == 0:
-        if g_proposed > 0:
-            g_ratio = float('inf')
-        else:
-            g_ratio = 1.0
-    else:
-        g_ratio = g_proposed / g_current
-
-    # Combine all terms:
-    # α = min(1, boundary_ratio * ratio_F * pq_ratio * g_ratio)
-    MH_ratio = boundary_ratio * ratio_F * pq_ratio * g_ratio
-    alpha = min(1.0, MH_ratio)
-
-    # Accept or reject
-    u = random.random()
-    return u <= alpha
-
-
-def run_mcmc_hard(df, q=0.04, beta=30, num_samples=200, lambda_param=2, max_pop_dev_threshold=0.05,
-                  compactness_threshold=0.22):
+def run_mcmc_hard(df, q=0.04,
+                  num_iterations=200,
+                  lambda_param=2,
+                  delta=0.05,
+                  compactness_threshold=0.22,
+                  compactness_constraint=True):
     """
     Algorithm 1.1 (Sampling contiguous redistricting plans with hard constraint)
 
@@ -116,21 +25,27 @@ def run_mcmc_hard(df, q=0.04, beta=30, num_samples=200, lambda_param=2, max_pop_
     Parameters:
     - df: DataFrame containing the nodes and their attributes.
     - q: Probability threshold for turning on edges.
-    - beta: Beta parameter for the Gibbs distribution.
-    - num_samples: Number of iterations to run the algorithm.
+    - num_iterations: Number of iterations to run the algorithm.
     - lambda_param: Lambda parameter for zero-truncated Poisson distribution (used in select_nonadjacent_components).
-    - max_pop_dev_threshold: Maximum population deviation allowed for a proposed partition.
+    - delta: Maximum population deviation allowed for a proposed partition.
     - compactness_threshold: Minimum compactness score allowed for a proposed partition.
+    - compactness_constraint: Boolean flag to enable or disable compactness constraint.
 
 
     Returns:
     - samples: List of partition samples after each iteration.
     - best_partition: The partition with the highest reward acording to custom reward function.
     """
-    # Precompute node-level data for reward calculations and prepare DataFrame
+    # Prepare DataFrame
     df = df.reset_index(drop=True)
     df['node_id'] = df.index
+
+    # Precompute populations and ideal population
     populations = df.set_index('node_id')['pop'].to_dict()
+    num_districts = len(set(df['cd_2020']))
+    ideal_pop = sum(populations.values()) / num_districts
+
+    # Precompute current partition and create GeoDataFrame
     initial_partition = df.set_index('node_id')['cd_2020'].to_dict()
     gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
 
@@ -140,53 +55,28 @@ def run_mcmc_hard(df, q=0.04, beta=30, num_samples=200, lambda_param=2, max_pop_
         for neighbor in row['adj']:  # row['adj'] should be a list of node ids adjacent to i
             G.add_edge(i, neighbor)
 
-    # Define g_func here so it can access `populations` and `beta` efficiently for each computation
-    def g_func(partition):
-        """
-        For every acceptance probability calculation, we need to compute this for current and proposed partitions.
-        Compute g(π) the Gibbs distribution unnormalized probability:
-        g(π) = exp(-β * sum_over_districts |(pop(district)/ideal_pop - 1)|)
-
-        In the paper, they make this more efficient by computing the differences in populations.
-        """
-        # Aggregate district populations using defaultdict
-        district_pop = defaultdict(float)
-        for node, dist in partition.items():
-            district_pop[dist] += populations[node]
-
-        # Precompute constants
-        total_pop = sum(populations.values())
-        num_districts = len(district_pop)
-        ideal_pop = total_pop / num_districts
-
-        # Compute deviation sum
-        deviation_sum = sum(abs((pop / ideal_pop) - 1) for pop in district_pop.values())
-
-        # Return g(π), the Gibbs distribution unnormalized probability
-        return np.exp(-beta * deviation_sum)
-
-    # Initialize the partition and store initial results for visualization
+    # Initialize the partition and store initial drawn partitions
     current_partition = initial_partition.copy()
-
-    # List to store partition samples
-    samples = []
-    i = 0
 
     # Initialize best partition and reward
     best_partition = current_partition.copy()
-    best_rep_bias = compute_partisan_bias(df, best_partition, dem_vote_col="pre_20_dem_bid",
+    best_rep_bias = compute_partisan_bias(df, best_partition,
+                                          dem_vote_col="pre_20_dem_bid",
                                           rep_vote_col="pre_20_rep_tru")
-    best_efficiency_gap = compute_efficiency_gap(df, best_partition, dem_vote_col="pre_20_dem_bid",
+    best_efficiency_gap = compute_efficiency_gap(df, best_partition,
+                                                 dem_vote_col="pre_20_dem_bid",
                                                  rep_vote_col="pre_20_rep_tru")
 
     # count iterations
-    total_attempts = 0
-    start_time = time.time()
+    iteration = 0  # iteration counter (nb time steps actually performed in the chain)
+    total_attempts = 0  # total attempts (samples) counter
+    start_time = time.time()  # Start time
+    samples = []  # List to store partition samples
 
     print("\nStarting sampling...")
 
     # Iterative algorithm
-    while i < num_samples:
+    while iteration < num_iterations:
         total_attempts += 1
         # Step 1: Determine E_on edges (Select edges in the same district with probability q)
         E_on = turn_on_edges(G, current_partition, q)
@@ -207,37 +97,48 @@ def run_mcmc_hard(df, q=0.04, beta=30, num_samples=200, lambda_param=2, max_pop_
         # Step 5: Hard check for equal population constraint + geometry compactness (and maybe voting share balance later)
         max_pop_dev = max_population_deviation(proposed_partition, populations)
         avg_compactness = compute_avg_compactness(proposed_partition, gdf)
-        if max_pop_dev >= max_pop_dev_threshold or avg_compactness <= compactness_threshold:
-            continue
+        if compactness_constraint:
+            if max_pop_dev >= delta or avg_compactness <= compactness_threshold:
+                continue
+        else:
+            if max_pop_dev >= delta:
+                continue
 
         # Step 6: Accept or reject the proposed partition based on the acceptance probability (Metropolis-Hastings)
-        if proposed_partition != current_partition and accept_or_reject_proposal(current_partition,
-                                                                                 proposed_partition,
-                                                                                 G, BCP_current_len, V_CP, R, q,
-                                                                                 lambda_param, g_func, df):
-            rep_bias = compute_partisan_bias(df, proposed_partition, dem_vote_col="pre_20_dem_bid",
+        # The paper showed that the target distribution is uniform for the hard constraints
+        # therefore g_current = g_proposed = 1
+        g_current = 1
+        g_proposed = 1
+        if accept_or_reject_proposal(current_partition,
+                                     proposed_partition,
+                                     G, BCP_current_len, V_CP,
+                                     R, q, lambda_param,
+                                     g_current, g_proposed, df):
+            rep_bias = compute_partisan_bias(df, proposed_partition,
+                                             dem_vote_col="pre_20_dem_bid",
                                              rep_vote_col="pre_20_rep_tru")
-            efficiency_gap = compute_efficiency_gap(df, proposed_partition, dem_vote_col="pre_20_dem_bid",
+            efficiency_gap = compute_efficiency_gap(df, proposed_partition,
+                                                    dem_vote_col="pre_20_dem_bid",
                                                     rep_vote_col="pre_20_rep_tru")
             if abs(best_efficiency_gap) >= abs(efficiency_gap) and abs(best_rep_bias) >= abs(
-                    rep_bias) and max_pop_dev <= max_pop_dev_threshold:
+                    rep_bias) and max_pop_dev <= delta * 0.8:
                 best_partition = proposed_partition
                 best_efficiency_gap = efficiency_gap
                 best_rep_bias = rep_bias
                 print(
-                    f"Sample {i:03} | Avg Compact: {avg_compactness:.6f} | Max Pop dev: {max_pop_dev * 100:.2f}% | "
-                    f"Rep Bias: {rep_bias * 100:.3f}% | Efficiency Gap: {efficiency_gap:.6f} | New Best !"
+                    f"Sample {iteration:03} | Avg Compact: {avg_compactness:.6f} | Max Pop dev: {max_pop_dev * 100:.2f}% | "
+                    f"Rep Bias: {rep_bias:.3f} | Efficiency Gap: {efficiency_gap:.6f} | New Best !"
                 )
             else:
                 print(
-                    f"Sample {i:03} | Avg Compact: {avg_compactness:.6f} | Max Pop dev: {max_pop_dev * 100:.2f}% | "
-                    f"Rep Bias: {rep_bias * 100:.3f}% | Efficiency Gap: {efficiency_gap:.6f} "
+                    f"Sample {iteration:03} | Avg Compact: {avg_compactness:.6f} | Max Pop dev: {max_pop_dev * 100:.2f}% | "
+                    f"Rep Bias: {rep_bias:.3f} | Efficiency Gap: {efficiency_gap:.6f} "
                 )
 
             # Save the current partition
             samples.append(proposed_partition)
             current_partition = proposed_partition
-            i += 1
+            iteration += 1
 
     print("\nEnd of sampling")
     print("Total sampling time:", time.time() - start_time)
@@ -247,21 +148,26 @@ def run_mcmc_hard(df, q=0.04, beta=30, num_samples=200, lambda_param=2, max_pop_
     return samples, best_partition
 
 
-def main(state_abrv="PA", seed=6162):
+# Define all hyperparameters for each state
+ALL_HYPERPARAMS_DICT = {
+    "IA": Hyperparameters(0.05, None, 1000, None, None, 2, 0.10, 0.25, True),
+    "PA": Hyperparameters(0.04, None, 200, None, None, 10, 0.10, 0.05, False),
+    "MA": Hyperparameters(0.10, None, 100, None, None, 2, 0.08, 0.22, True),
+    "MI": Hyperparameters(0.10, None, 100, None, None, 5, 0.08, 0.22, False)
+}
+
+
+def main(state_abrv="IA", seed=6162):
     """
     Main function to run the redistricting algorithm with the specified parameters.
-
-    These are all the parameters possible to tune for the algorithm. The hyperparameters are tuned for the state of
-    Iowa (IA) by default.
 
     Parameters (or hyperparameters tuned for Iowa by default, refer to the markdown for more other states):
     - state_abrv: The state abbreviation to load the data for (default: "IA").
     - seed: Random seed for reproducing results (default: 6162).
     - q: Probability threshold for turning on edges in the graph. (higher => More edges turned on, more components)
-    - beta: Inverse temperature for the Gibbs distribution. (Higher beta => More equal districts)
-    - num_samples: Number of iterations to run the algorithm. (more iterations => More samples in output)
+    - num_iterations: Number of iterations to run the algorithm. (more iterations => More samples in output)
     - lambda_param: Lambda parameter for zero-truncated Poisson distribution (higher => Change more counties at once)
-    - max_pop_dev_threshold: Maximum population deviation from equal districts. (lower => More equal districts)
+    - delta: Maximum population deviation from equal districts. (lower => More equal districts)
     - compactness_threshold: Minimum compactness threshold for districts. (higher => More compact districts)
 
     For smaller states like Iowa, the algorithm can be run with the default hyperparameters. For larger states, the
@@ -273,72 +179,35 @@ def main(state_abrv="PA", seed=6162):
     - save all the samples to a CSV file.
     """
     state_abrv = state_abrv.upper()
-    hyperparams_dict = {
-        # Small-scale study params for Iowa
-        "IA": {
-            "q": 0.05,
-            "beta": 9,
-            "num_samples": 1000,
-            "lambda_param": 2,
-            "max_pop_dev_threshold": 0.10,
-            "compactness_threshold": 0.25
-        },
-        # Large-scale study optimized params for Pennsylvania
-        "PA": {
-            "q": 0.04,
-            "beta": 20,
-            "num_samples": 100,
-            "lambda_param": 10,
-            "max_pop_dev_threshold": 0.10,
-            "compactness_threshold": 0.01,
-        },
-        "MA": {
-            "q": 0.10,
-            "beta": 30,
-            "num_samples": 100,
-            "lambda_param": 2,
-            "max_pop_dev_threshold": 0.08,
-            "compactness_threshold": 0.22
-        },
-        "MI": {
-            "q": 0.10,
-            "beta": 30,
-            "num_samples": 100,
-            "lambda_param": 5,
-            "max_pop_dev_threshold": 0.08,
-            "compactness_threshold": 0.22
-        }
-    }
-    q, beta, num_samples, lambda_param, max_pop_dev_threshold, compactness_threshold = hyperparams_dict[
-        state_abrv].values()
-    random.seed(seed)
+    params = ALL_HYPERPARAMS_DICT[state_abrv]
 
-    print(f"Running MCMC W/ HARD CONSTRAINTS for {STATE_ABBREVIATIONS[state_abrv]} with the following hyperparameters:")
-    print("seed:", seed)
-    print("q:", q)
-    print("beta:", beta)
-    print("num_samples:", num_samples)
-    print("lambda_param:", lambda_param)
-    print("max_pop_dev_threshold:", max_pop_dev_threshold)
-    print("compactness_threshold:", compactness_threshold)
+    # Print hyperparameters
+    print(
+        f"Running MCMC W/ HARD CONSTRAINTS for {STATE_ABBREVIATIONS[state_abrv]} with the following hyperparameters:\n")
+    print(f"seed: {seed}")
+    for field, value in params.__dict__.items():
+        print(f"{field}: {value}")
+    print("\n")
 
     # Run the algorithm with and tune hyperparameters
     # The best partition is according to an unfixed reward function.
     df = prep_data(state_abrv)
-    samples, best_partition = run_mcmc_hard(df,
-                                            q=q,
-                                            beta=beta,
-                                            num_samples=num_samples,
-                                            lambda_param=lambda_param,
-                                            max_pop_dev_threshold=max_pop_dev_threshold,
-                                            compactness_threshold=compactness_threshold)
+    samples, best_partition = run_mcmc_hard(
+        df,
+        q=params.q,
+        num_iterations=params.num_iterations,
+        lambda_param=params.lambda_param,
+        delta=params.max_pop_dev_threshold,
+        compactness_threshold=params.compactness_threshold,
+        compactness_constraint=params.compactness_constraint
+    )
 
     # Just for main:
     # Update the DataFrame with the best partition
     gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
 
     # Save partitions to a file
-    save_partitions_as_dataframe(samples, output_file=f"output/mcmc_soft_partitions_{state_abrv}.csv")
+    save_partitions_as_dataframe(samples, output_file=f"output/mcmc_hard_partitions_{state_abrv}.csv")
 
     ##############################################################
     # Best run: calculating metrics for the best partition
@@ -388,7 +257,7 @@ if __name__ == "__main__":
         profiler.runcall(main)
         stats = pstats.Stats(profiler).sort_stats(pstats.SortKey.TIME)
         stats.print_stats("mcmc_hard.py")
-        stats.print_stats("data_utils.py")
+        stats.print_stats("mcmc_utils.py")
         stats.dump_stats("profile_results.pstats")
     else:
         main()

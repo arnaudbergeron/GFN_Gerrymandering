@@ -3,6 +3,7 @@ import math
 import random
 import time
 from collections import defaultdict
+from typing import Optional
 from scipy.stats import poisson
 from itertools import chain
 import geopandas as gpd
@@ -94,10 +95,10 @@ NODE_SIZES = {
 @dataclass
 class Hyperparameters:
     q: float
-    beta: int
+    beta: Optional[int]  # int or None
     num_iterations: int
-    M: int
-    S: int
+    M: Optional[int]  # int or None
+    S: Optional[int]  # int or None
     lambda_param: float
     max_pop_dev_threshold: float
     compactness_threshold: float
@@ -761,3 +762,192 @@ def calculate_percentage_changed(partition_current, partition_original):
     )
     percent_changed = (changed_nodes / total_nodes) * 100
     return percent_changed
+
+
+def filter_valid_samples(samples, populations, gdf, delta, compactness_threshold, compactness_constraint):
+    """
+    Filters samples based on population deviation and compactness constraints.
+    """
+    valid_samples = []
+    for samp in samples:
+        max_dev = max_population_deviation(samp, populations)
+        if compactness_constraint:
+            avg_compactness = compute_avg_compactness(samp, gdf)
+            if max_dev <= delta and avg_compactness >= compactness_threshold:
+                # Keep only samples that meet the population and compactness constraints
+                valid_samples.append(samp)
+        elif max_dev <= delta:
+            # Keep only samples that meet the population constraint
+            valid_samples.append(samp)
+    return valid_samples
+
+
+def g_func_cached(partition, populations, beta, ideal_pop):
+    """
+    Optimized Gibbs distribution calculation with cached ideal population.
+    """
+    district_pop = defaultdict(float)
+    for node, dist in partition.items():
+        district_pop[dist] += populations[node]
+
+    # Compute deviation sum
+    deviation_sum = sum(abs((pop / ideal_pop) - 1) for pop in district_pop.values())
+    return np.exp(-beta * deviation_sum)
+
+
+def accept_or_reject_proposal(current_partition, proposed_partition,
+                              G, BCP_current,
+                              V_CP, R, q, lambda_param,
+                              g_current, g_proposed, df):
+    """
+    A simple Metropolis-Hastings accept/reject step. A new sample is proposed based on the previous sample,
+    then the proposed sample is either added to the chain or rejected based on the acceptance probability.
+
+    This approximation is valid under the assumption that we rarely reject samples drawn in Step 3(b) for adjacency or
+    shattering issues in our method "select_nonadjacent_components".
+
+    Assumes symmetric proposals, so the acceptance ratio is g(π')/g(π) and the ratio of the probabilities of the
+    Gibbs distribution for the two partitions for the population constraint.
+
+    Parameters:
+    - current_partition: The current partition π.
+    - proposed_partition: The proposed new partition π'.
+    - G: The graph of the precincts.
+    - BCP_current: The number of boundary components in the current partition.
+    - V_CP: The set of selected boundary components (not used here, but kept for consistency).
+    - R: The number of counties to change in the proposed partition.
+    - q: Probability threshold for turning on edges (not used directly here).
+    - lambda_param: The lambda parameter for the zero-truncated Poisson distribution.
+    - g_current: The unnormalized target probability g(π).
+    - g_proposed: The unnormalized target probability g(π').
+
+    Returns:
+    - A partition (dict): Either the proposed_partition if accepted, or the current_partition if rejected.
+    """
+    # Precomputed g(π) and g(π') - target distribution ratios
+
+    # If both g_current and g_proposed are zero, just reject to avoid division by zero
+    if g_current == 0 and g_proposed == 0:
+        return False
+    # If g_current == 0 but g_proposed > 0, we can set ratio to something large; effectively always accept
+    if g_current == 0 and g_proposed > 0:
+        return True
+
+    # |B(CP, π)| -> Precomputed from the main loop BCP_current = |B(CP, π)|
+    # Compute |B(CP, π')|
+    E_on_proposed = turn_on_edges(G, proposed_partition, q)
+    boundary_components_proposed = find_boundary_connected_components(G, proposed_partition, E_on_proposed)
+    BCP_proposed = len(boundary_components_proposed)
+
+    # OPT Visualization before changes (optional; can slow down execution by a lot)
+    # visualize_map_with_graph_and_geometry(G, E_on_proposed, boundary_components_proposed, V_CP, df, proposed_partition)
+
+    # Compute |C(π, V_CP)|
+    C_pi_VCP = compute_swendsen_wang_cut(G, current_partition, V_CP)
+
+    # Compute |C(π', V_CP)| by counting how V_CP is structured under π'
+    C_pi_prime_VCP = compute_swendsen_wang_cut(G, proposed_partition, V_CP)
+
+    # Compute F(|B(CP, π)|) and F(|B(CP, π')|)
+    # F is the truncated Poisson pmf for the chosen R given the number of boundary components
+    F_current = truncated_poisson_pmf(R, lambda_param, BCP_current)
+    F_proposed = truncated_poisson_pmf(R, lambda_param, BCP_proposed)
+
+    # Handle cases where F_proposed = 0 (no valid R under π')
+    # This would make the ratio infinite, but min(1, ...) caps it at 1.
+    if F_proposed == 0:
+        # If it's impossible to choose R from π' scenario, ratio becomes 0.
+        ratio_F = 0.0
+    else:
+        ratio_F = F_current / F_proposed
+
+    # Compute (|B(CP, π)| / |B(CP, π')|)^R
+    # If BCP_proposed = 0, can't form any boundary components (unlikely, but check)
+    if BCP_proposed == 0:
+        boundary_ratio = 0.0
+    else:
+        boundary_ratio = (BCP_current / BCP_proposed) ** R
+
+    # Compute ( (1-q)^{|C(π',V_CP)|} / (1-q)^{|C(π,V_CP)|} ) = (1-q)^{C_pi_prime_VCP - C_pi_VCP}
+    pq_ratio = (1 - q) ** (C_pi_prime_VCP - C_pi_VCP)
+
+    # Compute g(π')/g(π)
+    if g_current == 0:
+        if g_proposed > 0:
+            g_ratio = float('inf')
+        else:
+            g_ratio = 1.0
+    else:
+        g_ratio = g_proposed / g_current
+
+    # Combine all terms:
+    # α = min(1, boundary_ratio * ratio_F * pq_ratio * g_ratio)
+    MH_ratio = boundary_ratio * ratio_F * pq_ratio * g_ratio
+    alpha = min(1.0, MH_ratio)
+
+    # Accept or reject
+    u = random.random()
+    return u <= alpha
+
+
+def compute_full_partisan_bias(df, district_vector, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru",
+                               step=0.01):
+    """
+    Compute the partisan bias measure by:
+    1. Simulating uniform swings from 40% to 60% in statewide Dem share.
+    2. Constructing the seats-votes curve f(x).
+    3. Comparing f(x) to a symmetric reference f*(x) and integrating the difference.
+
+    Args:
+        df (pd.DataFrame): DataFrame with vote data per unit.
+        district_vector (list or pd.Series): District assignment for each unit.
+        dem_vote_col (str): Column name for Democratic votes.
+        rep_vote_col (str): Column name for Republican votes.
+        step (float): Increment for simulation steps (e.g., 0.01 for 1% increments).
+
+    Returns:
+        float: The computed partisan bias measure.
+    """
+    df = df.copy()
+    df['district'] = district_vector
+    district_votes = df.groupby('district')[[dem_vote_col, rep_vote_col]].sum().reset_index()
+    district_votes['total_votes'] = district_votes[dem_vote_col] + district_votes[rep_vote_col]
+
+    # Statewide totals
+    statewide_dem = district_votes[dem_vote_col].sum()
+    statewide_rep = district_votes[rep_vote_col].sum()
+    statewide_total = statewide_dem + statewide_rep
+    original_dem_share = statewide_dem / statewide_total
+
+    # Range of x values from 40% to 60%
+    lower_bound = 0.4
+    upper_bound = 0.6
+    x_values = np.arange(lower_bound, upper_bound + step, step)
+
+    def compute_seat_share_for_x(x):
+        delta = x - original_dem_share
+        district_votes['dem_share'] = district_votes[dem_vote_col] / district_votes['total_votes']
+        district_votes['dem_share_adj'] = district_votes['dem_share'] + delta
+        district_votes['dem_share_adj'] = district_votes['dem_share_adj'].clip(0, 1)
+
+        district_votes['dem_votes_adj'] = district_votes['dem_share_adj'] * district_votes['total_votes']
+        district_votes['rep_votes_adj'] = (1 - district_votes['dem_share_adj']) * district_votes['total_votes']
+
+        dem_wins = (district_votes['dem_votes_adj'] > district_votes['rep_votes_adj']).sum()
+        total_districts = len(district_votes)
+        return dem_wins / total_districts
+
+    # Compute f(x)
+    f_values = np.array([compute_seat_share_for_x(x) for x in x_values])
+
+    # Symmetric baseline f*(x): linear from f*(0.4)=0 to f*(0.6)=1
+    f_star_values = (x_values - 0.4) / 0.2
+
+    # Integrate difference [f(x)-f*(x)]
+    differences = f_values - f_star_values
+    integral = np.trapz(differences, x_values)
+
+    eta = 0.1
+    partisan_bias = (1 / eta) * integral
+
+    return partisan_bias

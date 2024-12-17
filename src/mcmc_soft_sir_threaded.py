@@ -4,116 +4,6 @@ import multiprocessing
 from mcmc_utils import *
 
 
-# from mcmc_soft import accept_or_reject_proposal
-
-def accept_or_reject_proposal(current_partition, proposed_partition,
-                              G, BCP_current,
-                              V_CP, R, q, lambda_param,
-                              g_current, g_proposed, df):
-    """
-    A simple Metropolis-Hastings accept/reject step. A new sample is proposed based on the previous sample,
-    then the proposed sample is either added to the chain or rejected based on the acceptance probability.
-
-    This approximation is valid under the assumption that we rarely reject samples drawn in Step 3(b) for adjacency or
-    shattering issues in our method "select_nonadjacent_components".
-
-    Assumes symmetric proposals, so the acceptance ratio is g(π')/g(π) and the ratio of the probabilities of the
-    Gibbs distribution for the two partitions for the population constraint.
-
-    Parameters:
-    - current_partition: The current partition π.
-    - proposed_partition: The proposed new partition π'.
-    - G: The graph of the precincts.
-    - BCP_current: The number of boundary components in the current partition.
-    - V_CP: The set of selected boundary components (not used here, but kept for consistency).
-    - R: The number of counties to change in the proposed partition.
-    - q: Probability threshold for turning on edges (not used directly here).
-    - lambda_param: The lambda parameter for the zero-truncated Poisson distribution.
-    - g_current: The unnormalized target probability g(π).
-    - g_proposed: The unnormalized target probability g(π').
-
-    Returns:
-    - A partition (dict): Either the proposed_partition if accepted, or the current_partition if rejected.
-    """
-    # Precomputed g(π) and g(π') - target distribution ratios
-
-    # If both g_current and g_proposed are zero, just reject to avoid division by zero
-    if g_current == 0 and g_proposed == 0:
-        return False
-    # If g_current == 0 but g_proposed > 0, we can set ratio to something large; effectively always accept
-    if g_current == 0 and g_proposed > 0:
-        return True
-
-    # |B(CP, π)| -> Precomputed from the main loop BCP_current = |B(CP, π)|
-    # Compute |B(CP, π')|
-    E_on_proposed = turn_on_edges(G, proposed_partition, q)
-    boundary_components_proposed = find_boundary_connected_components(G, proposed_partition, E_on_proposed)
-    BCP_proposed = len(boundary_components_proposed)
-
-    # OPT Visualization before changes (optional; can slow down execution by a lot)
-    # visualize_map_with_graph_and_geometry(G, E_on_proposed, boundary_components_proposed, V_CP, df, proposed_partition)
-
-    # Compute |C(π, V_CP)|
-    C_pi_VCP = compute_swendsen_wang_cut(G, current_partition, V_CP)
-
-    # Compute |C(π', V_CP)| by counting how V_CP is structured under π'
-    C_pi_prime_VCP = compute_swendsen_wang_cut(G, proposed_partition, V_CP)
-
-    # Compute F(|B(CP, π)|) and F(|B(CP, π')|)
-    # F is the truncated Poisson pmf for the chosen R given the number of boundary components
-    F_current = truncated_poisson_pmf(R, lambda_param, BCP_current)
-    F_proposed = truncated_poisson_pmf(R, lambda_param, BCP_proposed)
-
-    # Handle cases where F_proposed = 0 (no valid R under π')
-    # This would make the ratio infinite, but min(1, ...) caps it at 1.
-    if F_proposed == 0:
-        # If it's impossible to choose R from π' scenario, ratio becomes 0.
-        ratio_F = 0.0
-    else:
-        ratio_F = F_current / F_proposed
-
-    # Compute (|B(CP, π)| / |B(CP, π')|)^R
-    # If BCP_proposed = 0, can't form any boundary components (unlikely, but check)
-    if BCP_proposed == 0:
-        boundary_ratio = 0.0
-    else:
-        boundary_ratio = (BCP_current / BCP_proposed) ** R
-
-    # Compute ( (1-q)^{|C(π',V_CP)|} / (1-q)^{|C(π,V_CP)|} ) = (1-q)^{C_pi_prime_VCP - C_pi_VCP}
-    pq_ratio = (1 - q) ** (C_pi_prime_VCP - C_pi_VCP)
-
-    # Compute g(π')/g(π)
-    if g_current == 0:
-        if g_proposed > 0:
-            g_ratio = float('inf')
-        else:
-            g_ratio = 1.0
-    else:
-        g_ratio = g_proposed / g_current
-
-    # Combine all terms:
-    # α = min(1, boundary_ratio * ratio_F * pq_ratio * g_ratio)
-    MH_ratio = boundary_ratio * ratio_F * pq_ratio * g_ratio
-    alpha = min(1.0, MH_ratio)
-
-    # Accept or reject
-    u = random.random()
-    return u <= alpha
-
-
-def g_func_cached(partition, populations, beta, ideal_pop):
-    """
-    Optimized Gibbs distribution calculation with cached ideal population.
-    """
-    district_pop = defaultdict(float)
-    for node, dist in partition.items():
-        district_pop[dist] += populations[node]
-
-    # Compute deviation sum
-    deviation_sum = sum(abs((pop / ideal_pop) - 1) for pop in district_pop.values())
-    return np.exp(-beta * deviation_sum)
-
-
 def generate_valid_sample(drawn_partitions, G, q, lambda_param, populations, beta, ideal_pop, df):
     """
     Helper function to generate a single valid sample using the basic algorithm steps.
@@ -128,7 +18,7 @@ def generate_valid_sample(drawn_partitions, G, q, lambda_param, populations, bet
     V_CP, R = select_nonadjacent_components(boundary_components, G, current_partition, lambda_param=lambda_param)  # 3
     proposed_partition = propose_swaps(current_partition, V_CP, G)  # 4. Propose swaps
 
-    # Step 6: Acceptance check
+    # Step 5: Acceptance check
     g_current = g_func_cached(current_partition, populations, beta, ideal_pop)
     g_proposed = g_func_cached(proposed_partition, populations, beta, ideal_pop)
     accepted = accept_or_reject_proposal(
@@ -169,24 +59,6 @@ def generate_valid_samples_parallel(drawn_partitions, G, q, lambda_param, M, pop
     return valid_samples, attempts
 
 
-def filter_valid_samples(samples, populations, gdf, delta, compactness_threshold, compactness_constraint):
-    """
-    Filters samples based on population deviation and compactness constraints.
-    """
-    valid_samples = []
-    for samp in samples:
-        max_dev = max_population_deviation(samp, populations)
-        if compactness_constraint:
-            avg_compactness = compute_avg_compactness(samp, gdf)
-            if max_dev <= delta and avg_compactness >= compactness_threshold:
-                # Keep only samples that meet the population and compactness constraints
-                valid_samples.append(samp)
-        elif max_dev <= delta:
-            # Keep only samples that meet the population constraint
-            valid_samples.append(samp)
-    return valid_samples
-
-
 def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
                            num_iterations=20,  # Number of outer iterations
                            M=10,  # M samples generated each iteration
@@ -196,7 +68,7 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
                            compactness_threshold=0.22,
                            compactness_constraint=True):
     """
-    Closer implementation to the algorithm described in the image of Algorithm 1.2 (soft constraint).
+    Implementation of the algorithm described in Algorithm 1.2 (soft constraint with Sampling/Importance Resampling).
 
     Steps:
     - We have num_iterations "cycles".
@@ -208,12 +80,13 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
 
     Arguments:
     - df: DataFrame with nodes and their attributes.
-    - reward_w: dictionary of weights for the reward function.
     - q, beta, lambda_param: parameters as in the original code.
     - num_iterations: how many times we run the M-sample generation + filtering + SIR cycle.
     - M: how many samples we generate each iteration.
     - S: how many samples we draw after SIR.
     - delta: population constraint threshold.
+    - compactness_threshold: minimum compactness threshold for districts.
+    - compactness_constraint: whether to apply compactness constraint.
 
     Returns:
     - samples: list of all final samples (S samples per iteration * num_iterations)
@@ -363,19 +236,23 @@ ALL_HYPERPARAMS_DICT = {
 }
 
 
-def main(state_abrv="PA", seed=6162):
+def main(state_abrv="IA", seed=6162):
     """
     Main function to run the redistricting algorithm with the specified parameters.
 
     These are all the parameters possible to tune for the algorithm. The hyperparameters are tuned for the state of
     Iowa (IA) by default.
 
-    Parameters (or hyperparameters tuned for Iowa by default, refer to the markdown for more other states):
+    Parameters:
     - state_abrv: The state abbreviation to load the data for (default: "IA").
     - seed: Random seed for reproducing results (default: 6162).
+
+    Hyperparameters tuned for Iowa by default, refer to the markdown for more other states):
     - q: Probability threshold for turning on edges in the graph. (higher => More edges turned on, more components)
     - beta: Inverse temperature for the Gibbs distribution. (Higher beta => More equal districts)
     - num_iterations: Number of iterations to run the algorithm. (more iterations => More samples in output)
+    - M: Number of samples to generate in each iteration. (higher => More samples, more computation time)
+    - S: Number of samples to draw from SIR resampling. (higher => More samples, keep more diverse samples to draw from)
     - lambda_param: Lambda parameter for zero-truncated Poisson distribution (higher => Change more counties at once)
     - max_pop_dev_threshold: Maximum population deviation from equal districts. (lower => More equal districts)
     - compactness_threshold: Minimum compactness threshold for districts. (higher => More compact districts)
@@ -471,6 +348,7 @@ if __name__ == "__main__":
         profiler.runcall(main)
         stats = pstats.Stats(profiler).sort_stats(pstats.SortKey.TIME)
         stats.print_stats("mcmc_soft_sir_threaded.py")
+        stats.print_stats("mcmc_utils.py")
         stats.dump_stats("profile_results.pstats")
     else:
         main()

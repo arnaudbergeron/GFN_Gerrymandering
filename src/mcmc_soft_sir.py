@@ -1,5 +1,4 @@
 from mcmc_utils import *
-from mcmc_soft import accept_or_reject_proposal
 
 
 def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
@@ -8,9 +7,10 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
                            S=5,  # S samples drawn from SIR
                            lambda_param=2,
                            delta=0.05,
-                           compactness_threshold=0.22):
+                           compactness_threshold=0.22,
+                           compactness_constraint=True):
     """
-    Closer implementation to the algorithm described in the image of Algorithm 1.2 (soft constraint).
+    Algorithm 1.2 (soft constraint with Sampling/Importance Resampling).
 
     Steps:
     - We have num_iterations "cycles".
@@ -22,21 +22,28 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
 
     Arguments:
     - df: DataFrame with nodes and their attributes.
-    - reward_w: dictionary of weights for the reward function.
     - q, beta, lambda_param: parameters as in the original code.
     - num_iterations: how many times we run the M-sample generation + filtering + SIR cycle.
     - M: how many samples we generate each iteration.
     - S: how many samples we draw after SIR.
     - delta: population constraint threshold.
+    - compactness_threshold: minimum compactness threshold for districts.
+    - compactness_constraint: whether to apply compactness constraint.
 
     Returns:
     - samples: list of all final samples (S samples per iteration * num_iterations)
     - best_partition: best partition found so far.
     """
-    # Precompute node-level data for reward calculations and prepare DataFrame
+    # Prepare DataFrame
     df = df.reset_index(drop=True)
     df['node_id'] = df.index
+
+    # Precompute populations and ideal population
     populations = df.set_index('node_id')['pop'].to_dict()
+    num_districts = len(set(df['cd_2020']))
+    ideal_pop = sum(populations.values()) / num_districts
+
+    # Precompute current partition and create GeoDataFrame
     initial_partition = df.set_index('node_id')['cd_2020'].to_dict()
     gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
 
@@ -46,54 +53,26 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
         for neighbor in row['adj']:  # row['adj'] should be a list of node ids adjacent to i
             G.add_edge(i, neighbor)
 
-        # Define g_func here so it can access `populations` and `beta` efficiently for each computation
-        def g_func(partition):
-            """
-            For every acceptance probability calculation, we need to compute this for current and proposed partitions.
-            Compute g(π) the Gibbs distribution unnormalized probability:
-            g(π) = exp(-β * sum_over_districts |(pop(district)/ideal_pop - 1)|)
-
-            The more the populations among districts deviate from the ideal population, the lower the probability.
-
-            In the paper, they make this more efficient by computing the differences in populations.
-            """
-            # Aggregate district populations using defaultdict
-            district_pop = defaultdict(float)
-            for node, dist in partition.items():
-                district_pop[dist] += populations[node]
-
-            # Precompute constants
-            total_pop = sum(populations.values())
-            num_districts = len(district_pop)
-            ideal_pop = total_pop / num_districts
-
-            # Compute deviation sum
-            deviation_sum = sum(abs((pop / ideal_pop) - 1) for pop in district_pop.values())
-
-            # Return g(π), the Gibbs distribution unnormalized probability
-            return np.exp(-beta * deviation_sum)
-
-    # Initialize
+    # Initialize the partition and store initial drawn partitions
     drawn_partitions = [initial_partition.copy()]  # Start from initial partition
-    # Initialize the partition and store initial results for visualization
     current_partition = initial_partition.copy()
-
-    # List to store partition samples
-    samples = []
-    iteration = 0
 
     # Initialize best partition and reward
     best_partition = current_partition.copy()
-    best_rep_bias = compute_partisan_bias(df, best_partition, dem_vote_col="pre_20_dem_bid",
+    best_rep_bias = compute_partisan_bias(df, best_partition,
+                                          dem_vote_col="pre_20_dem_bid",
                                           rep_vote_col="pre_20_rep_tru")
-    best_efficiency_gap = compute_efficiency_gap(df, best_partition, dem_vote_col="pre_20_dem_bid",
+    best_efficiency_gap = compute_efficiency_gap(df, best_partition,
+                                                 dem_vote_col="pre_20_dem_bid",
                                                  rep_vote_col="pre_20_rep_tru")
 
     # count iterations
-    total_attempts = 0
-    start_time = time.time()
+    iteration = 0  # iteration counter (nb time steps actually performed in the chain)
+    total_attempts = 0  # total attempts (samples) counter
+    start_time = time.time()  # Start time
+    samples = []  # List to store partition samples
 
-    print("Starting Algorithm 1.2 (Soft constraint) ...")
+    print("Starting Algorithm 1.2 (Soft constraint with SIR) ...")
 
     while iteration < num_iterations:
         # Step 1: Generate M samples using the basic algorithm.
@@ -113,14 +92,17 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
                                                     lambda_param=lambda_param)  # 3. Select V_CP
             proposed_partition = propose_swaps(current_partition, V_CP, G)
 
+            # Step 5: Acceptance check
             # Note: Here we do NOT check population or compactness yet.
             # We just check acceptance probability.
-            accepted = accept_or_reject_proposal(current_partition,
-                                                 proposed_partition,
-                                                 G, BCP_current_len, V_CP, R, q,
-                                                 lambda_param, g_func, df)
-            if accepted and proposed_partition != current_partition:
-                iteration_samples.append(proposed_partition.copy())
+            g_current = g_func_cached(current_partition, populations, beta, ideal_pop)
+            g_proposed = g_func_cached(proposed_partition, populations, beta, ideal_pop)
+            accepted = accept_or_reject_proposal(
+                current_partition, proposed_partition, G, BCP_current_len, V_CP, R, q, lambda_param, g_current,
+                g_proposed, df
+            )
+            if accepted:
+                iteration_samples.append(proposed_partition)
 
         # Now we have M samples accepted by the MH step.
 
@@ -128,42 +110,49 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
         # The paper states "For a specified population constraint δ, discard those samples."
         # Here we interpret the constraint: max_{ℓ} |(Sum_i∈Vℓ p_i)/p̃ - 1| > δ
         # This is basically the same as max_pop_dev > δ.
-        valid_samples = []
-        for samp in iteration_samples:
-            max_dev = max_population_deviation(samp, populations)
-            avg_compactness = compute_avg_compactness(samp, gdf)
-            if max_dev <= delta and avg_compactness >= compactness_threshold:
-                # Keep only samples that meet the population constraint
-                valid_samples.append(samp)
-
-        if len(valid_samples) == 0:
-            print(f"Iteration {iteration:02}: No valid samples after applying population constraint. Continuing...")
+        valid_samples = filter_valid_samples(iteration_samples,
+                                             populations, gdf, delta,
+                                             compactness_threshold,
+                                             compactness_constraint)
+        if not valid_samples:
+            print(
+                f"Iteration {iteration:02}: No valid samples after applying population constraint. "
+                f"Resampling M samples."
+            )
             # If no valid samples, we might just continue with next iteration
             # or handle differently. For now, let's just continue.
             # No SIR is performed.
             continue
 
         # Step 3: SIR resampling from the valid samples using weights = 1/g_β(π)
-        weights = np.array([1 / g_func(samp) for samp in valid_samples])
+        weights = np.array([1 / g_func_cached(samp, populations, beta, ideal_pop) for samp in valid_samples])
         weights /= weights.sum()
-
-        # Draw S samples with replacement
         chosen_indices = np.random.choice(len(valid_samples), size=S, p=weights, replace=True)
         drawn_partitions = [valid_samples[idx].copy() for idx in chosen_indices]
 
         # Compute metrics for all drawn partitions
         rep_biases = [compute_partisan_bias(df, p, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru")
                       for p in drawn_partitions]
-        efficiency_gaps = [compute_efficiency_gap(df, p, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru")
-                           for p in drawn_partitions]
+        efficiency_gaps = [
+            compute_efficiency_gap(df, p, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru")
+            for p in drawn_partitions]
         max_pop_devs = [max_population_deviation(p, populations) for p in drawn_partitions]
         avg_compactnesses = [compute_compactness(gdf, p)[0] for p in drawn_partitions]
 
         # Find the best partition based on efficiency gap, rep bias, and population deviation
-        valid_best_indices = [i for i, (eg, rb, mpd) in enumerate(zip(efficiency_gaps, rep_biases, max_pop_devs))
-                              if abs(eg) <= abs(best_efficiency_gap)
-                              and abs(rb) <= abs(best_rep_bias)
-                              and mpd <= delta * 0.8]
+        if compactness_constraint:
+            valid_best_indices = [i for i, (eg, rb, mpd, ac) in
+                                  enumerate(zip(efficiency_gaps, rep_biases, max_pop_devs, avg_compactnesses))
+                                  if abs(eg) <= abs(best_efficiency_gap)
+                                  and abs(rb) <= abs(best_rep_bias)
+                                  and mpd <= delta
+                                  and ac >= compactness_threshold]
+        else:
+            valid_best_indices = [i for i, (eg, rb, mpd) in
+                                  enumerate(zip(efficiency_gaps, rep_biases, max_pop_devs))
+                                  if abs(eg) <= abs(best_efficiency_gap)
+                                  and abs(rb) <= abs(best_rep_bias)
+                                  and mpd <= delta]
 
         if valid_best_indices:
             # Select the best partition based on criteria
@@ -172,9 +161,11 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
             best_efficiency_gap = efficiency_gaps[best_idx]
             best_rep_bias = rep_biases[best_idx]
             print(
-                f"\nNew Best! | Avg Compact: {avg_compactnesses[best_idx]:.6f} | "
+                f"Iteration {iteration:02} | "
+                f"Curr Compact: {avg_compactnesses[best_idx]:.6f} | "
                 f"Max Pop dev: {max_pop_devs[best_idx] * 100:.2f}% | "
-                f"Rep Bias: {rep_biases[best_idx]:.3f} | Efficiency Gap: {efficiency_gaps[best_idx]:.6f}\n"
+                f"Efficiency Gap: {efficiency_gaps[best_idx]:.6f} | "
+                f"Rep Bias: {rep_biases[best_idx]:.3f} New Best! "
             )
         # Append these S samples to global samples
         samples.extend(drawn_partitions)
@@ -192,7 +183,7 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
         total_attempts += attempts
         iteration += 1
 
-    print("End of Algorithm 1.2 (Soft constraint)")
+    print("\nEnd of Algorithm 1.2 (Soft constraint with SIR)")
     print("Total sampling time:", time.time() - start_time)
     print(
         f"Total attempts: {total_attempts} | Total samples: {len(samples)} | "
@@ -200,19 +191,29 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
     return samples, best_partition
 
 
-def main(state_abrv="PA", seed=6162):
+# Define all hyperparameters for each state
+ALL_HYPERPARAMS_DICT = {
+    "IA": Hyperparameters(0.05, 9, 1000, 10, 5, 2, 0.10, 0.25, True),
+    "PA": Hyperparameters(0.04, 30, 200, 10, 5, 10, 0.10, 0.05, False),
+    "MA": Hyperparameters(0.10, 30, 100, 10, 5, 2, 0.08, 0.22, True),
+    "MI": Hyperparameters(0.10, 30, 100, 10, 5, 5, 0.08, 0.22, False)
+}
+
+
+def main(state_abrv="IA", seed=6162):
     """
     Main function to run the redistricting algorithm with the specified parameters.
 
-    These are all the parameters possible to tune for the algorithm. The hyperparameters are tuned for the state of
-    Iowa (IA) by default.
-
-    Parameters (or hyperparameters tuned for Iowa by default, refer to the markdown for more other states):
+    Parameters:
     - state_abrv: The state abbreviation to load the data for (default: "IA").
     - seed: Random seed for reproducing results (default: 6162).
+
+    Hyperparameters tuned for Iowa by default, refer to the markdown for more other states):
     - q: Probability threshold for turning on edges in the graph. (higher => More edges turned on, more components)
     - beta: Inverse temperature for the Gibbs distribution. (Higher beta => More equal districts)
     - num_iterations: Number of iterations to run the algorithm. (more iterations => More samples in output)
+    - M: Number of samples to generate in each iteration. (higher => More samples, more computation time)
+    - S: Number of samples to draw from SIR resampling. (higher => More samples, keep more diverse samples to draw from)
     - lambda_param: Lambda parameter for zero-truncated Poisson distribution (higher => Change more counties at once)
     - max_pop_dev_threshold: Maximum population deviation from equal districts. (lower => More equal districts)
     - compactness_threshold: Minimum compactness threshold for districts. (higher => More compact districts)
@@ -226,84 +227,39 @@ def main(state_abrv="PA", seed=6162):
     - save all the samples to a CSV file.
     """
     state_abrv = state_abrv.upper()
-    hyperparams_dict = {
-        # Small-scale study params for Iowa
-        "IA": {
-            "q": 0.05,
-            "beta": 9,
-            "num_iterations": 1000,
-            "M": 10,
-            "S": 5,
-            "lambda_param": 2,
-            "max_pop_dev_threshold": 0.075,
-            "compactness_threshold": 0.25
-        },
-        # Large-scale study optimized params for Pennsylvania
-        "PA": {
-            "q": 0.04,
-            "beta": 20,
-            "num_iterations": 100,
-            "M": 10,
-            "S": 5,
-            "lambda_param": 10,
-            "max_pop_dev_threshold": 0.10,
-            "compactness_threshold": 0.10,
-        },
-        "MA": {
-            "q": 0.10,
-            "beta": 30,
-            "num_iterations": 100,
-            "M": 10,
-            "S": 5,
-            "lambda_param": 2,
-            "max_pop_dev_threshold": 0.08,
-            "compactness_threshold": 0.22
-        },
-        "MI": {
-            "q": 0.10,
-            "beta": 30,
-            "num_iterations": 100,
-            "M": 10,
-            "S": 5,
-            "lambda_param": 5,
-            "max_pop_dev_threshold": 0.08,
-            "compactness_threshold": 0.22
-        }
-    }
-    q, beta, num_iterations, M, S, lambda_param, max_pop_dev_threshold, compactness_threshold = hyperparams_dict[
-        state_abrv].values()
+    params = ALL_HYPERPARAMS_DICT[state_abrv]
+
+    # Print hyperparameters
+    print(
+        f"Running MCMC W/ HARD CONSTRAINTS for {STATE_ABBREVIATIONS[state_abrv]} with the following hyperparameters:\n")
+    print(f"seed: {seed}")
+    for field, value in params.__dict__.items():
+        print(f"{field}: {value}")
+    print("\n")
+
+    # Run the algorithm with tuned hyperparameters to get all samples and
+    # the best partition according to bias and efficiency gap
     random.seed(seed)
-
-    print(f"Running MCMC W/ HARD CONSTRAINTS for {STATE_ABBREVIATIONS[state_abrv]} with the following hyperparameters:")
-    print("seed:", seed)
-    print("q:", q)
-    print("beta:", beta)
-    print("num_iterations:", num_iterations)
-    print("M:", M)
-    print("S:", S)
-    print("lambda_param:", lambda_param)
-    print("max_pop_dev_threshold:", max_pop_dev_threshold)
-    print("compactness_threshold:", compactness_threshold)
-
-    # Run the algorithm with and tune hyperparameters
-    # The best partition is according to an unfixed reward function.
     df = prep_data(state_abrv)
-    samples, best_partition = run_mcmc_soft_with_sir(df,
-                                                     q=q,
-                                                     beta=beta,
-                                                     num_iterations=num_iterations,
-                                                     M=M,
-                                                     S=S,
-                                                     lambda_param=lambda_param,
-                                                     delta=max_pop_dev_threshold,
-                                                     compactness_threshold=compactness_threshold)
+    samples, best_partition = run_mcmc_soft_with_sir(
+        df,
+        q=params.q,
+        beta=params.beta,
+        num_iterations=params.num_iterations,
+        M=params.M,
+        S=params.S,
+        lambda_param=params.lambda_param,
+        delta=params.max_pop_dev_threshold,
+        compactness_threshold=params.compactness_threshold,
+        compactness_constraint=params.compactness_constraint
+    )
 
     # Just for main:
     # Update the DataFrame with the best partition
     gdf = gpd.GeoDataFrame(df, geometry=df['geometry'])
 
     # Save partitions to a file
-    save_partitions_as_dataframe(samples, output_file=f"output/mcmc_soft_partitions_{state_abrv}.csv")
+    save_partitions_as_dataframe(samples, output_file=f"output/TEST_mcmc_soft_sir_partitions_{state_abrv}.csv")
 
     ##############################################################
     # Best run: calculating metrics for the best partition
@@ -352,8 +308,8 @@ if __name__ == "__main__":
         profiler = cProfile.Profile()
         profiler.runcall(main)
         stats = pstats.Stats(profiler).sort_stats(pstats.SortKey.TIME)
-        stats.print_stats("mcmc_hard.py")
-        stats.print_stats("data_utils.py")
+        stats.print_stats("mcmc_soft_sir_threaded.py")
+        stats.print_stats("mcmc_utils.py")
         stats.dump_stats("profile_results.pstats")
     else:
         main()
