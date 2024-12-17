@@ -467,30 +467,6 @@ def is_adjacent_to_vcp(C, V_CP, G):
     return False
 
 
-# def causes_noncontiguous_district(V_CP, district_nodes, G):
-#     """
-#     Check if the removal of V_CP causes a noncontiguous district.
-#
-#     Parameters:
-#     - V_CP: Set of selected components to be removed.
-#     - district_nodes: Precomputed mapping of districts to their nodes.
-#     - G: The graph (NetworkX object).
-#
-#     Returns:
-#     - Boolean indicating if removing V_CP causes a noncontiguous district.
-#     """
-#     if not V_CP:
-#         return False  # If no components are selected, no districts can become noncontiguous
-#
-#     for district, nodes in district_nodes.items():
-#         remaining_nodes = nodes - V_CP
-#         if remaining_nodes:
-#             subgraph = G.subgraph(remaining_nodes)
-#             if not nx.is_connected(subgraph):
-#                 return True  # Noncontiguous district found
-#     return False
-
-
 def causes_noncontiguous_district(V_CP, district_nodes, G):
     """
     Check if the removal of V_CP causes a noncontiguous district (creates a new districts by breaking one into two).
@@ -557,32 +533,25 @@ def find_neighboring_districts(component, partition, G):
     Returns:
     - A list of neighboring districts.
     """
-    # # Ensure component is a set
-    # component = set(component)
-    #
-    # # Determine the current district
-    # current_district = next(iter({partition[n] for n in component}))
-    #
-    # # Find all neighbors of nodes in the component
-    # neighbors = set(
-    #     neighbor for node in component for neighbor in G.neighbors(node)
-    # )
-    #
-    # # Exclude nodes within the component
-    # external_neighbors = neighbors - component
-    #
-    # # Collect districts of external neighbors not in the current district
-    # adjacent_districts = {partition[neighbor] for neighbor in external_neighbors
-    #                       if partition[neighbor] != current_district}
-    #
-    # return list(adjacent_districts)
+    # Ensure component is a set
+    component = set(component)
+
+    # Determine the current district
     current_district = next(iter({partition[n] for n in component}))
-    return list({
-        partition[neighbor]
-        for node in component
-        for neighbor in G.neighbors(node)
-        if partition[neighbor] != current_district
-    })
+
+    # Find all neighbors of nodes in the component
+    neighbors = set(
+        neighbor for node in component for neighbor in G.neighbors(node)
+    )
+
+    # Exclude nodes within the component
+    external_neighbors = neighbors - component
+
+    # Collect districts of external neighbors not in the current district
+    adjacent_districts = {partition[neighbor] for neighbor in external_neighbors
+                          if partition[neighbor] != current_district}
+
+    return list(adjacent_districts)
 
 
 def truncated_poisson_pmf(r, lambda_, max_count):
