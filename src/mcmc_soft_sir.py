@@ -193,7 +193,7 @@ def run_mcmc_soft_with_sir(df, q=0.04, beta=30,
 
 # Define all hyperparameters for each state
 ALL_HYPERPARAMS_DICT = {
-    "IA": Hyperparameters(0.05, 9, 1000, 10, 5, 2, 0.10, 0.25, True),
+    "IA": Hyperparameters(0.05, 9, 10000, 10, 5, 2, 0.05, 0.25, True),
     "PA": Hyperparameters(0.04, 30, 200, 10, 5, 10, 0.10, 0.05, False),
     "MA": Hyperparameters(0.10, 30, 100, 10, 5, 2, 0.08, 0.22, True),
     "MI": Hyperparameters(0.10, 30, 100, 10, 5, 5, 0.08, 0.22, False)
