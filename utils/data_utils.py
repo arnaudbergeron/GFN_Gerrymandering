@@ -142,7 +142,7 @@ def compute_partisan_bias_integral(df, district_vector, dem_vote_col="pre_20_dem
 
     # Integrate difference [f(x)-f*(x)]
     differences = f_values - f_star_values
-    integral = np.trapezoid(differences, x_values)
+    integral = np.trapz(differences, x_values)
 
     eta = 0.1
     partisan_bias = (1 / eta) * integral
