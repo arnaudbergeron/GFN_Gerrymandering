@@ -364,7 +364,7 @@ def summarize_district_metrics(df, district_vector,
 # VISUALIZATION #
 #################
 
-def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru"):
+def plot_district_swaps(df, new_districts, initial_districts="cd_2020", dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru"):
     """
     Creates an interactive plot with dropdown selection showing KDE plot and district map side by side.
     
@@ -380,7 +380,7 @@ def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vo
         display(district_dropdown)
         
         # Extract data for the current district
-        current_district = df[df['cd_2010'] == district_id]
+        current_district = df[df[initial_districts] == district_id]
         initial_indexes = list(current_district.index)
         new_indexes = list(np.where(new_districts == district_id)[0])
         
