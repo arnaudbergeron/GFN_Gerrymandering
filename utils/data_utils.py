@@ -1,16 +1,18 @@
-import json
-import pandas as pd
-import matplotlib.pyplot as plt
-import geopandas as gpd
-from shapely.geometry import shape, Point, box
-from math import atan2, radians, sin, cos, pi
-import numpy as np
 import ast
+import json
+from collections import defaultdict
+from math import atan2, cos, pi, radians, sin
+
+import geopandas as gpd
 import ipywidgets as widgets
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-from IPython.display import display, clear_output
-from scipy.stats import entropy
+from IPython.display import clear_output, display
 from matplotlib.ticker import PercentFormatter
+from scipy.stats import entropy
+from shapely.geometry import Point, box, shape
 from collections import defaultdict
 
 ################
