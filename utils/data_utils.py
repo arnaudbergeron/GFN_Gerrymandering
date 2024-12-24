@@ -1,5 +1,6 @@
 import ast
 import json
+from collections import defaultdict
 from math import atan2, cos, pi, radians, sin
 
 import geopandas as gpd
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from IPython.display import clear_output, display
+from matplotlib.ticker import PercentFormatter
 from scipy.stats import entropy
 from shapely.geometry import Point, box, shape
 
@@ -87,9 +89,72 @@ def compute_efficiency_gap(df, district_vector, dem_vote_col="pre_20_dem_bid", r
     return efficiency_gap
 
 
-def compute_partisan_bias(df, district_vector, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru", v=0.5):
+def compute_partisan_bias_integral(df, district_vector, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru", step=0.01):
     """
-    Compute the partisan bias as described by the formula:
+    Compute the partisan bias measure by:
+    1. Simulating uniform swings from 40% to 60% in statewide Dem share.
+    2. Constructing the seats-votes curve f(x).
+    3. Comparing f(x) to a symmetric reference f*(x) and integrating the difference.
+
+    Args:
+        df (pd.DataFrame): DataFrame with vote data per unit.
+        district_vector (list or pd.Series): District assignment for each unit.
+        dem_vote_col (str): Column name for Democratic votes.
+        rep_vote_col (str): Column name for Republican votes.
+        step (float): Increment for simulation steps (e.g., 0.01 for 1% increments).
+
+    Returns:
+        float: The computed partisan bias measure.
+    """
+    df = df.copy()
+    df['district'] = district_vector
+    district_votes = df.groupby('district')[[dem_vote_col, rep_vote_col]].sum().reset_index()
+    district_votes['total_votes'] = district_votes[dem_vote_col] + district_votes[rep_vote_col]
+
+    # Statewide totals
+    statewide_dem = district_votes[dem_vote_col].sum()
+    statewide_rep = district_votes[rep_vote_col].sum()
+    statewide_total = statewide_dem + statewide_rep
+    original_dem_share = statewide_dem / statewide_total
+
+    # Range of x values from 40% to 60%
+    lower_bound = 0.4
+    upper_bound = 0.6
+    x_values = np.arange(lower_bound, upper_bound + step, step)
+
+    def compute_seat_share_for_x(x):
+        delta = x - original_dem_share
+        district_votes['dem_share'] = district_votes[dem_vote_col] / district_votes['total_votes']
+        district_votes['dem_share_adj'] = district_votes['dem_share'] + delta
+        district_votes['dem_share_adj'] = district_votes['dem_share_adj'].clip(0, 1)
+
+        district_votes['dem_votes_adj'] = district_votes['dem_share_adj'] * district_votes['total_votes']
+        district_votes['rep_votes_adj'] = (1 - district_votes['dem_share_adj']) * district_votes['total_votes']
+        
+        dem_wins = (district_votes['dem_votes_adj'] > district_votes['rep_votes_adj']).sum()
+        total_districts = len(district_votes)
+        return dem_wins / total_districts
+
+    # Compute f(x)
+    f_values = np.array([compute_seat_share_for_x(x) for x in x_values])
+
+    # Symmetric baseline f*(x): linear from f*(0.4)=0 to f*(0.6)=1
+    f_star_values = (x_values - 0.4) / 0.2
+
+    # Integrate difference [f(x)-f*(x)]
+    differences = f_values - f_star_values
+    integral = np.trapz(differences, x_values)
+
+    eta = 0.1
+    partisan_bias = (1 / eta) * integral
+
+    return -partisan_bias
+
+
+def compute_partisan_bias(df, district_vector, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru", v_list=[0.4, 0.45, 0.5, 0.55, 0.6]):
+    """
+    Compute the mean partisan bias over a list of targeted Democratic vote shares.
+
     Partisan Bias = (Seats_D(v) - [1 - Seats_D(1-v)]) / 2
 
     Args:
@@ -97,11 +162,15 @@ def compute_partisan_bias(df, district_vector, dem_vote_col="pre_20_dem_bid", re
         district_vector (list or pd.Series): District assignment for each unit.
         dem_vote_col (str): Column name for Democratic votes.
         rep_vote_col (str): Column name for Republican votes.
-        v (float): The targeted Democratic share of the vote, default 0.5.
+        v_list (list of floats): List of targeted Democratic shares of the vote (e.g., [0.4, 0.45, 0.5]).
+                                Default is [0.5].
 
     Returns:
-        float: The computed partisan bias measure.
+        float: The mean partisan bias over the list of vote shares.
     """
+    if v_list is None:
+        v_list = [0.5]  # Default to a single value of 0.5 if no list is provided
+
     df = df.copy()
     df['district'] = district_vector
     district_votes = df.groupby('district')[[dem_vote_col, rep_vote_col]].sum().reset_index()
@@ -131,11 +200,17 @@ def compute_partisan_bias(df, district_vector, dem_vote_col="pre_20_dem_bid", re
         total_districts = len(district_votes)
         return dem_wins / total_districts
 
-    seats_d_at_v = seats_d_given_share(v)
-    seats_d_at_1minusv = seats_d_given_share(1 - v)
+    # Compute partisan bias for each vote share in v_list
+    bias_values = []
+    for v in v_list:
+        seats_d_at_v = seats_d_given_share(v)
+        seats_d_at_1minusv = seats_d_given_share(1 - v)
+        partisan_bias = (seats_d_at_v - (1 - seats_d_at_1minusv)) / 2
+        bias_values.append(-partisan_bias)  # Negate to return Republican bias like in the paper
 
-    partisan_bias = (seats_d_at_v - (1 - seats_d_at_1minusv)) / 2
-    return -partisan_bias # -1 to return republican bias like in the paper
+    # Return the mean partisan bias
+    mean_partisan_bias = np.mean(bias_values)
+    return mean_partisan_bias
 
 
 def compute_compactness(df, district_vector):
@@ -200,11 +275,97 @@ def compute_population_entropy(df, district_vector, population_col="pop"):
     # Compute and return the entropy of the population ratios
     return entropy(population_ratios)
 
+
+def summarize_district_metrics(df, district_vector, 
+                               dem_vote_col="pre_20_dem_bid", 
+                               rep_vote_col="pre_20_rep_tru", 
+                               population_col="pop"):
+    """
+    Summarize main metrics for a given set of districts and compare them to initial districts (cd_2020):
+    1. Partisan Bias
+    2. Efficiency Gap
+    3. Compactness (Polsby-Popper)
+    4. Maximum Absolute Population Deviation
+
+    Args:
+        df (pd.DataFrame or gpd.GeoDataFrame): DataFrame containing election, population, and geometry data.
+        district_vector (list or pd.Series): Vector of district assignments.
+        dem_vote_col (str): Column name for Democratic votes.
+        rep_vote_col (str): Column name for Republican votes.
+        population_col (str): Column name for population data.
+
+    Returns:
+        pd.DataFrame: A DataFrame summarizing the computed metrics for the current and initial districts.
+    """
+    # Copy the data to avoid modifications
+    df = df.copy()
+    
+    # Initialize comparison metrics dictionary
+    metrics = {"Metric": []}
+    current_results = []
+    initial_results = []
+
+    # Helper function to compute all metrics
+    def compute_metrics(districts):
+        temp_df = df.copy()
+        temp_df['district'] = districts
+        
+        # 1. Partisan Bias
+        partisan_bias = compute_partisan_bias_integral(temp_df, districts, dem_vote_col, rep_vote_col)
+        
+        # 2. Efficiency Gap
+        efficiency_gap = compute_efficiency_gap(temp_df, districts, dem_vote_col, rep_vote_col)
+        
+        # 3. Compactness (Polsby-Popper)
+        if isinstance(df, gpd.GeoDataFrame):  # Compactness requires geometry data
+            mean_compactness, std_compactness = compute_compactness(temp_df, districts)
+        else:
+            mean_compactness, std_compactness = None, None
+        
+        # 4. Maximum Absolute Population Deviation
+        total_population = temp_df[population_col].sum()
+        num_districts = len(set(districts))
+        ideal_population = total_population / num_districts
+
+        # Calculate population per district
+        district_population = defaultdict(float)
+        for pop, district in zip(temp_df[population_col], districts):
+            district_population[district] += pop
+
+        max_dev = max(abs((p / ideal_population) - 1) for p in district_population.values())
+
+        # Return results as a dictionary
+        return {
+            "Partisan Bias": round(float(partisan_bias), 4),
+            "Efficiency Gap": round(float(efficiency_gap), 4),
+            "Compactness (Mean)": round(float(mean_compactness), 4) if mean_compactness else "N/A",
+            "Compactness (Std)": round(float(std_compactness), 4) if std_compactness else "N/A",
+            "Max Population Deviation (%)": round(float(max_dev * 100), 4),
+        }
+
+    # Compute metrics for both current and initial districts
+    current_metrics = compute_metrics(district_vector)
+    initial_metrics = compute_metrics(df['cd_2020'])
+
+    # Prepare the summary DataFrame
+    for metric in current_metrics.keys():
+        metrics["Metric"].append(metric)
+        current_results.append(current_metrics[metric])
+        initial_results.append(initial_metrics[metric])
+
+    metrics["Current Districts"] = current_results
+    metrics["Initial Districts"] = initial_results
+
+    # Convert to DataFrame
+    summary_df = pd.DataFrame(metrics)
+    return summary_df
+
+
 #################
 # VISUALIZATION #
 #################
 
-def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru"):
+def plot_district_swaps(df, new_districts, initial_districts="cd_2020", dem_vote_col="pre_20_dem_bid", rep_vote_col="pre_20_rep_tru"):
     """
     Creates an interactive plot with dropdown selection showing KDE plot and district map side by side.
     
@@ -220,7 +381,7 @@ def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vo
         display(district_dropdown)
         
         # Extract data for the current district
-        current_district = df[df['cd_2010'] == district_id]
+        current_district = df[df[initial_districts] == district_id]
         initial_indexes = list(current_district.index)
         new_indexes = list(np.where(new_districts == district_id)[0])
         
@@ -299,46 +460,75 @@ def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vo
     create_plot(districts[0])
 
 
-def partisan_bias_vs_presincts_changed(df, proposed_partitions):
+def partisan_bias_vs_precincts_changed(df, proposed_partitions):
     """
     Generate a plot of partisan bias vs. percentage of precincts switched from the original district.
+    A horizontal line is added to represent the initial bias.
 
     Args:
         df (pd.DataFrame): DataFrame containing precincts with a column `cd_2020` for initial district assignments.
         proposed_partitions (pd.DataFrame): DataFrame with proposed partitions and rewards.
 
     Returns:
-        None: Displays a plot.
+        list: Best district assignment based on minimum bias and precinct changes.
     """
     initial_districts = np.array(df['cd_2020'])
     points = []
 
+    # Compute the initial bias with cd_2020
+    initial_bias = compute_partisan_bias_integral(df, district_vector=initial_districts)
+
+    # Compute points (percentage changed, partisan bias)
     for row in proposed_partitions.itertuples():
         partition = row.Partition
         districts = np.array(list(ast.literal_eval(partition).values()))
         diff = initial_districts != districts
         ptg = np.sum(diff) / len(districts)  # Percentage of switched precincts
-        points.append((ptg, compute_partisan_bias(df, district_vector=districts)))
+        points.append((ptg, compute_partisan_bias_integral(df, district_vector=districts), districts))
 
     # Split points into x and y for plotting
-    x, y = zip(*points)
+    x, y, districts = zip(*points)
+
+    # Find the "best" point: minimum bias with minimum % of precincts switched
+    abs_bias = np.abs(y)  # Absolute bias
+
+    # Set a threshold to treat near-zero values as zero
+    threshold = 1e-4
+    abs_bias = np.where(abs_bias < threshold, 0, abs_bias)  # Round tiny biases to zero
+
+    # Sort by bias (absolute bias first, then percentage of precincts switched)
+    sorted_indices = np.lexsort((x, abs_bias))  # Sort by bias, then by pctg changed
+    best_index = sorted_indices[0]  # Best point is the first after sorting
+
+    best_x = x[best_index]
+    best_y = y[best_index]
+    best_district = districts[best_index]
 
     # Plotting
-    plt.figure(figsize=(10, 6))
-    plt.scatter(x, y, color="black", s=10, alpha=0.7, label="Simulated Plans")
-    plt.axhline(0, color="red", linestyle="--", linewidth=1, label="Unbiased Plan (0 Bias)")
-    plt.axvline(0.03, color="blue", linestyle="--", linewidth=1, label="Minimal Bias Threshold (3%)")
-    
+    plt.figure(figsize=(10, 8))
+    plt.scatter(x, y, color="black", s=10, alpha=0.1, label="Simulated Plans")
+    plt.scatter(best_x, best_y, color="green", s=100, label="Best Plan", zorder=5)
+
+    # Add horizontal line for initial bias
+    plt.axhline(initial_bias, color="red", linestyle="--", linewidth=1, label="Initial Bias (Original Districts)")
+
     # Customize aesthetics
     plt.title("Partisan Bias of Simulated Plans", fontsize=14)
     plt.xlabel("% of Precincts Switched From Original District", fontsize=12)
-    plt.ylabel("Partisan Bias towards Democrats", fontsize=12)
+    plt.ylabel("Partisan Bias (Negative is Democrat Advantage)", fontsize=12)
     plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
-    plt.legend(fontsize=10, loc="upper right")
-    plt.tight_layout()
+
+    # Format x-axis as percentage
+    plt.gca().xaxis.set_major_formatter(PercentFormatter(xmax=1))
+
+    # Adjust legend placement at the top and ensure space
+    plt.legend(fontsize=10, loc="upper center", bbox_to_anchor=(0.5, 1.15), ncol=3)
+    plt.tight_layout(rect=[0, 0, 1, 0.9])  # Add extra space at the top for the legend
 
     # Show the plot
     plt.show()
+
+    return best_district
 
 
 # First, add a new function to calculate required margins after box placement
@@ -398,36 +588,37 @@ def visualize_map_with_geometry(df, geometry_col, district_id_col, state, metric
                       for d in unique_districts}
     centroids = {d: district_geoms[d].centroid.coords[0] for d in unique_districts}
 
-    # Calculate metrics
-    aggregated_metrics = {}
     if metrics:
-        grouped = gdf.groupby(district_id_col)
-        for district in unique_districts:
-            district_data = grouped.get_group(district)
-            metric_texts = []
+        # Calculate metrics
+        aggregated_metrics = {}
+        if metrics:
+            grouped = gdf.groupby(district_id_col)
+            for district in unique_districts:
+                district_data = grouped.get_group(district)
+                metric_texts = []
 
-            if "total" in metrics and metrics["total"]:
-                for col, var_name in metrics["total"]:
-                    total = district_data[col].sum()
-                    metric_texts.append(f"Total {var_name}: {total:,}")
-                    metric_texts.append("━━━━━━━━━━━")
+                if "total" in metrics and metrics["total"]:
+                    for col, var_name in metrics["total"]:
+                        total = district_data[col].sum()
+                        metric_texts.append(f"Total {var_name}: {total:,}")
+                        metric_texts.append("━━━━━━━━━━━")
 
-            if "mean" in metrics and metrics["mean"]:
-                for col, var_name in metrics["mean"]:
-                    mean = district_data[col].mean()
-                    metric_texts.append(f"Mean {var_name}: {mean:.2f}")
-                    metric_texts.append("━━━━━━━━━━━")
+                if "mean" in metrics and metrics["mean"]:
+                    for col, var_name in metrics["mean"]:
+                        mean = district_data[col].mean()
+                        metric_texts.append(f"Mean {var_name}: {mean:.2f}")
+                        metric_texts.append("━━━━━━━━━━━")
 
-            if "ratio" in metrics and metrics["ratio"]:
-                for group in metrics["ratio"]:
-                    cols = [x[0] for x in group]  # Get column names
-                    group_total = district_data[cols].sum(axis=0).sum()
-                    for col, var_name in group:
-                        ratio = (district_data[col].sum() / group_total * 100) if group_total != 0 else 0
-                        metric_texts.append(f"{var_name}: {ratio:.1f}%")
-                    metric_texts.append("━━━━━━━━━━━")
+                if "ratio" in metrics and metrics["ratio"]:
+                    for group in metrics["ratio"]:
+                        cols = [x[0] for x in group]  # Get column names
+                        group_total = district_data[cols].sum(axis=0).sum()
+                        for col, var_name in group:
+                            ratio = (district_data[col].sum() / group_total * 100) if group_total != 0 else 0
+                            metric_texts.append(f"{var_name}: {ratio:.1f}%")
+                        metric_texts.append("━━━━━━━━━━━")
 
-            aggregated_metrics[district] = "\n".join(metric_texts)
+                aggregated_metrics[district] = "\n".join(metric_texts)
 
     # Create figure
     fig, ax = plt.subplots(figsize=(25, 20))
@@ -538,41 +729,42 @@ def visualize_map_with_geometry(df, geometry_col, district_id_col, state, metric
     district_sizes = {d: district_geoms[d].area for d in unique_districts}
     sorted_districts = sorted(unique_districts, key=lambda d: district_sizes[d], reverse=True)
 
-    for d in sorted_districts:
-        text = aggregated_metrics.get(d, "")
-        box_color = district_colors[d]
-        cx, cy = centroids[d]
-        w, h = estimate_box_size(text)
+    if metrics:
+        for d in sorted_districts:
+            text = aggregated_metrics.get(d, "")
+            box_color = district_colors[d]
+            cx, cy = centroids[d]
+            w, h = estimate_box_size(text)
 
-        district_geom = district_geoms[d]
-        if is_enclaved(district_geom):
-            nearest_point = nearest_edge_point(district_geom)
-            ref_x, ref_y = nearest_point.x, nearest_point.y
-            x_arrow, y_arrow = cx, cy
-        else:
-            nearest_point = nearest_edge_point(district_geom)
-            ref_x, ref_y = nearest_point.x, nearest_point.y
-            x_arrow, y_arrow = ref_x, ref_y
+            district_geom = district_geoms[d]
+            if is_enclaved(district_geom):
+                nearest_point = nearest_edge_point(district_geom)
+                ref_x, ref_y = nearest_point.x, nearest_point.y
+                x_arrow, y_arrow = cx, cy
+            else:
+                nearest_point = nearest_edge_point(district_geom)
+                ref_x, ref_y = nearest_point.x, nearest_point.y
+                x_arrow, y_arrow = ref_x, ref_y
 
-        base_angle = atan2(ref_y - cy, ref_x - cx)
+            base_angle = atan2(ref_y - cy, ref_x - cx)
 
-        placement = find_placement((cx, cy), w, h, base_angle)
+            placement = find_placement((cx, cy), w, h, base_angle)
 
-        if placement:
-            x_try, y_try, x_min, y_min, x_max, y_max = placement
+            if placement:
+                x_try, y_try, x_min, y_min, x_max, y_max = placement
 
-            ax.annotate(
-                text,
-                xy=(x_arrow, y_arrow),
-                xycoords="data",
-                xytext=(x_try, y_try),
-                textcoords="data",
-                ha="center",
-                va="center",
-                bbox=dict(facecolor=box_color, alpha=0.9, boxstyle="round,pad=0.3"),
-                arrowprops=dict(arrowstyle="->", color="black"),
-            )
-            placed_boxes.append((x_min, y_min, x_max, y_max))
+                ax.annotate(
+                    text,
+                    xy=(x_arrow, y_arrow),
+                    xycoords="data",
+                    xytext=(x_try, y_try),
+                    textcoords="data",
+                    ha="center",
+                    va="center",
+                    bbox=dict(facecolor=box_color, alpha=0.9, boxstyle="round,pad=0.3"),
+                    arrowprops=dict(arrowstyle="->", color="black"),
+                )
+                placed_boxes.append((x_min, y_min, x_max, y_max))
 
     # After placing all boxes, calculate required margins for each side
     left_margin, right_margin, top_margin, bottom_margin = calculate_required_margins(
