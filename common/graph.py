@@ -15,6 +15,7 @@ class Graph:
         self.taken_actions = None
         self.num_county = 0
         self.previous_state = None
+        self.df = None
         # self.state[vertex_id, 0] is the district_id of the vertex with vertex_id negative if it is on the border
         # self.state[vertex_id, 1:] is the adjacent vertices of the vertex with vertex_id
 
@@ -48,7 +49,7 @@ class Graph:
 
 
         # Initialize the state tensor with zeros
-        self.state = torch.zeros((len(self.vertices), max_adjacent_vertices + 1), device=self.device)
+        self.state = torch.zeros((len(self.vertices), max_adjacent_vertices + 1 + num_districts), device=self.device)
         self.previous_state = torch.zeros((len(self.vertices)), device=self.device)
 
         # Populate the state tensor with district ids and adjacent vertices
@@ -59,9 +60,11 @@ class Graph:
             _adj_tensor = torch.zeros(max_adjacent_vertices, device=self.device)
             len_adj = len(vertex.adj_vertices)
             _adj_tensor[:len_adj] = torch.tensor(list(vertex.adj_vertices), device=self.device)
-            self.state[vertex_id, 1:] = _adj_tensor
+            self.state[vertex_id, 1:max_adjacent_vertices+1] = _adj_tensor
 
         self.previous_state[:] = self.state[:, 0]
+        self.max_adjacent_vertices = max_adjacent_vertices
+        self.df = df
 
     def get_border_vertices(self):
         """
@@ -82,13 +85,13 @@ class Graph:
             vertex_id (int): The id of the vertex to change the district.
             new_district_id (int): The new district id.
         """
-        vertex = self.vertices[prescinct_id]
-        old_district_id = vertex.district_id
+        _vertex = self.vertices[prescinct_id]
+        old_district_id = _vertex.district_id
         if new_district_id == old_district_id:
             raise ValueError("The vertex is already in the district you want to change to")
         
         if (prescinct_id, new_district_id) not in self.vertex_on_border.keys():
-            raise ValueError("The vertex is not on the border with the district you want to change to")
+            raise ValueError(f"The vertex is not on the border with the district you want to change to: {prescinct_id, new_district_id}")
         
         # we first change the district of the vertex and remove it from the vertex_on_border dict 
         # then we update the bordering_vertex with our new district dict
@@ -100,11 +103,21 @@ class Graph:
         for vertex in list_to_check_possible_actions:
             # we remove all border information related to that vertex
             if self.district_id_on_border_of_vertex.get(vertex.prescinct_id) is not None:
-                for adj_vertex_id in self.district_id_on_border_of_vertex[vertex.prescinct_id].copy():
+                for adj_vertex_did in range(1, self.max_district_id+1):
                     # could be optimized but wtv
-                    self.vertex_on_border.pop((vertex.prescinct_id, adj_vertex_id))
-                    self.district_id_on_border_of_vertex[vertex.prescinct_id].remove(adj_vertex_id)
-                    self.state[vertex.prescinct_id, 0] = vertex.district_id
+                    if self.vertex_on_border.get((vertex.prescinct_id, adj_vertex_did)) is not None:
+                        self.vertex_on_border.pop((vertex.prescinct_id, adj_vertex_did))
+
+                    district_on_border = self.district_id_on_border_of_vertex.get(vertex.prescinct_id)
+                    if district_on_border is not None:
+                        if len(district_on_border) > 0:
+                            if adj_vertex_did in district_on_border:
+                                district_on_border.remove(adj_vertex_did)
+
+                    self.state[vertex.prescinct_id, self.max_adjacent_vertices+1:][adj_vertex_did-1] = 0
+            self.state[vertex.prescinct_id, 0] = vertex.district_id
+
+                    # self.state[vertex.prescinct_id, 1:][self.state[vertex.prescinct_id, 1:].abs() == adj_vertex_id] = adj_vertex_id
 
             
             # we recompute all border information related to changed vertex
@@ -129,11 +142,13 @@ class Graph:
         """
         vertex_prescinct_id = vertex.prescinct_id
         # update possible actions
-        self.vertex_on_border[(vertex_prescinct_id, adj_vertex.district_id)] = \
-                        torch.tensor([vertex_prescinct_id, vertex.district_id, adj_vertex.district_id], device=self.device)
+        self.vertex_on_border[(vertex_prescinct_id, adj_vertex.district_id)] = 1
                     
         # add state information about the bordering vertex by encoding with negative of id
         self.state[vertex_prescinct_id, 0] = -vertex.district_id
+        self.state[vertex_prescinct_id, self.max_adjacent_vertices+1:][adj_vertex.district_id-1] = 1
+        # self.state[vertex.prescinct_id, 1:][self.state[vertex.prescinct_id, 1:].abs() == adj_vertex.prescinct_id] = -adj_vertex.prescinct_id
+
 
         # update bordering district information
         if self.district_id_on_border_of_vertex.get(vertex_prescinct_id) is None:

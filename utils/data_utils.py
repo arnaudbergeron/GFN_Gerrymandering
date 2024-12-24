@@ -1,14 +1,16 @@
-import json
-import pandas as pd
-import matplotlib.pyplot as plt
-import geopandas as gpd
-from shapely.geometry import shape, Point, box
-from math import atan2, radians, sin, cos, pi
-import numpy as np
 import ast
+import json
+from math import atan2, cos, pi, radians, sin
+
+import geopandas as gpd
 import ipywidgets as widgets
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-from IPython.display import display, clear_output
+from IPython.display import clear_output, display
+from scipy.stats import entropy
+from shapely.geometry import Point, box, shape
 
 ################
 # COMPUTATIONS #
@@ -169,11 +171,11 @@ def compute_compactness(df, district_vector):
         compactness_scores.append(score)
 
     # Return the mean compactness score across all districts
-    return np.mean(compactness_scores) if compactness_scores else 0
+    return np.mean(compactness_scores), np.std(compactness_scores)
 
-def compute_population_variance(df, district_vector, population_col="pop"):
+def compute_population_entropy(df, district_vector, population_col="pop"):
     """
-    Compute the variance in the population between districts.
+    Compute the entropy of the population ratio across districts.
 
     Args:
         df (pd.DataFrame): DataFrame with population data.
@@ -181,19 +183,22 @@ def compute_population_variance(df, district_vector, population_col="pop"):
         population_col (str): Column name for the population data.
 
     Returns:
-        float: The variance in population between districts.
+        float: The entropy of the population ratio across districts.
     """
     # Copy the DataFrame to avoid modifying the original
     df = df.copy()
-    
+
     # Assign districts to the DataFrame
     df['district'] = district_vector
-    
+
     # Compute the total population for each district
     district_population = df.groupby('district')[population_col].sum()
-    
-    # Compute and return the variance in district populations
-    return district_population.var()
+
+    # Compute the population ratio for each district
+    population_ratios = district_population / district_population.sum()
+
+    # Compute and return the entropy of the population ratios
+    return entropy(population_ratios)
 
 #################
 # VISUALIZATION #
@@ -294,18 +299,18 @@ def plot_district_swaps(df, new_districts, dem_vote_col="pre_20_dem_bid", rep_vo
     create_plot(districts[0])
 
 
-def partisan_bias_vs_presincts_changed(initial_districts, proposed_partitions):
+def partisan_bias_vs_presincts_changed(df, proposed_partitions):
     """
     Generate a plot of partisan bias vs. percentage of precincts switched from the original district.
 
     Args:
-        initial_districts (array-like): Initial district assignments.
+        df (pd.DataFrame): DataFrame containing precincts with a column `cd_2020` for initial district assignments.
         proposed_partitions (pd.DataFrame): DataFrame with proposed partitions and rewards.
 
     Returns:
         None: Displays a plot.
     """
-    initial_districts = np.array(initial_districts)
+    initial_districts = np.array(df['cd_2020'])
     points = []
 
     for row in proposed_partitions.itertuples():
@@ -334,6 +339,7 @@ def partisan_bias_vs_presincts_changed(initial_districts, proposed_partitions):
 
     # Show the plot
     plt.show()
+
 
 # First, add a new function to calculate required margins after box placement
 def calculate_required_margins(placed_boxes, minx, miny, maxx, maxy):

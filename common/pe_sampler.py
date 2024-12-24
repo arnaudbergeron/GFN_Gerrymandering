@@ -44,9 +44,9 @@ class DistrictPolicyEstimator(GFNModule):
         self,
         states: States,
         module_output: torch.Tensor,
-        temperature: float = 1.0,
+        temperature: float = 2.0,
         sf_bias: float = 0.0,
-        epsilon: float = 0.0,
+        epsilon: float = 0.05,
     ) -> Categorical:
         """Returns a probability distribution given a batch of states and module output.
 
@@ -105,11 +105,12 @@ class DistrictSampler(Sampler):
     def __init__(self, estimator):
         super().__init__(estimator)
 
-    def sample_actions(self, env, states):
+    def sample_actions(self, env, states, step, max_len, epsilon):
         est_output = self.estimator(states)
-
+        # eps = 0.01
+        # eps = eps * ((step+1) / max_len)**2
         dist_county, dist_district = self.estimator.to_probability_distribution(
-            states, est_output
+            states, est_output, temperature=5.0, epsilon=epsilon
         )
 
         with torch.no_grad():
@@ -133,6 +134,8 @@ class DistrictSampler(Sampler):
         conditioning: Optional[torch.Tensor] = None,
         save_estimator_outputs: bool = False,
         save_logprobs: bool = True,
+        max_len: Optional[int] = None,
+        epsilon: float = 0.05,
         **policy_kwargs: Any,
     ) -> Trajectories:
         """Sample trajectories sequentially.
@@ -196,8 +199,12 @@ class DistrictSampler(Sampler):
 
         step = 0
         all_estimator_outputs = []
-
+        old_valid = torch.ones(states.batch_shape, dtype=torch.bool, device=device)
+        trajectories_is_valid.append(old_valid)
+        states.is_start = ~states.is_start
         while not all(dones):
+            if max_len is not None and step >= max_len:
+                max_len = step
             actions = env.Actions.make_dummy_actions(batch_shape=(n_trajectories,))
             log_probs = torch.full(
                 (n_trajectories,), fill_value=0, dtype=torch.float, device=device
@@ -214,8 +221,12 @@ class DistrictSampler(Sampler):
             valid_actions, actions_log_probs, estimator_outputs = self.sample_actions(
                 env,
                 states[~dones],
+                step,
+                max_len,
+                epsilon=epsilon,
                 **policy_kwargs,
             )
+
             if estimator_outputs is not None:
                 # Place estimator outputs into a stackable tensor. Note that this
                 # will be replaced with torch.nested.nested_tensor in the future.
@@ -232,6 +243,10 @@ class DistrictSampler(Sampler):
 
             is_valid = env.get_valid_actions(states, actions, self.estimator.is_backward)
 
+            is_valid = is_valid.to(device)
+            is_valid = is_valid & old_valid
+            old_valid = is_valid
+
             env.is_valid = is_valid
 
             if save_logprobs:
@@ -247,7 +262,7 @@ class DistrictSampler(Sampler):
                 sink_states_mask = sink_states_mask & ~dones
             else:
                 new_states = env._step(states, actions)
-                sink_states_mask = actions.is_exit
+                sink_states_mask = actions.is_exit | actions.is_dummy
                 sink_states_mask = sink_states_mask | ~is_valid
 
             # Increment the step, determine which trajectories are finisihed, and eval
@@ -266,9 +281,10 @@ class DistrictSampler(Sampler):
                 else sink_states_mask
             ) & ~dones
             trajectories_dones[new_dones & ~dones] = step
+            mask_idx = (new_dones & ~dones).nonzero().reshape(-1).tolist()
             try:
                 trajectories_log_rewards[new_dones & ~dones] = env.log_reward(
-                    states[new_dones & ~dones], is_valid
+                    states[new_dones & ~dones], valid_actions, is_valid[new_dones & ~dones], mask_idx, step
                 )
             except NotImplementedError:
                 trajectories_log_rewards[new_dones & ~dones] = torch.log(
