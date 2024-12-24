@@ -1,16 +1,16 @@
 # GFlowNets - Automatic Redistricting to Solve Gerrymandering
 
-## TODO:
+Gerrymandering is the practice of drawing electoral
+district boundaries to unfairly favor one political
+party or group.
 
-- [ ] make actions work (with hard contiguity constraints)
-  - [ ] start from empty district plan (num_districts initiated) then add one node at a time
-  - [ ] OR change district nb of one node; then percolate boundary for adjacent nodes
-- [ ] make a full trajectory without reward
-- [ ] implement contiguity constraints on trajectory
-- [ ] implement population constraints probability (less probable to change
-      if the action leads to very unequal populations amongst districts
-- [ ] implement reward (population, 50%-50% split share of votes matching
-      elected seats)
+We replicate the results of the *Markov chain Monte Carlo*
+(MCMC) algorithms presented in the paper *Automated Redistricting Simulation Using Markov Chain Monte Carlo*. The MCMC algorithm incorporates contiguity and equal population constraints to produce valid districting plans.
+
+To extend these results, we implement a novel *GFlowNet* approach to redistricting. GFlowNets allow for efficient exploration of diverse redistricting solutions, complementing the MCMC framework by improving the sampling process.
+
+![map_with_graph](https://github.com/user-attachments/assets/7149221e-9de4-45a8-8618-e40fe806798d)
+
 
 ## Sections
 
