@@ -13,6 +13,7 @@ from IPython.display import clear_output, display
 from matplotlib.ticker import PercentFormatter
 from scipy.stats import entropy
 from shapely.geometry import Point, box, shape
+from collections import defaultdict
 
 ################
 # COMPUTATIONS #

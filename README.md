@@ -78,6 +78,11 @@ Torchgfn:
 
 ## Results
 
+In the paper, they demonstrate that small changes in the district boundaries can
+nearly eliminate partisan bias in the electoral outcome. They also show that
+the proposed method can be used to generate a large number of redistricting
+plans that are both contiguous and compact.
+
 ## Conclusion
 
 ## References
