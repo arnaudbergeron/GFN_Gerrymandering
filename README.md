@@ -1,4 +1,4 @@
-# GFlowNets - Automatic Redistricting to Solve Gerrymandering
+# Automatic Redistricting Using GFlowNets to Solve Gerrymandering
 
 Gerrymandering is the practice of drawing electoral
 district boundaries to unfairly favor one political
@@ -9,7 +9,8 @@ We replicate the results of the _Markov chain Monte Carlo_
 
 To extend these results, we implement a novel _GFlowNet_ approach to redistricting. GFlowNets allow for efficient exploration of diverse redistricting solutions, complementing the MCMC framework by improving the sampling process.
 
-![map_with_graph](https://github.com/user-attachments/assets/7149221e-9de4-45a8-8618-e40fe806798d)
+![Poster Page 1](poster/poster_page_1.png)
+![Poster Page 2](poster/poster_page_2.png)
 
 # Sections
 
@@ -63,9 +64,35 @@ The data has been extracted and saved in json format using jsonlite in R.
 
 # Methodology
 
-MCMC Sampling + Generative Flow Networks
+## MCMC Sampling
 
-GFNs ressources:
+Core algorithm:
+- **Initialization**: Start from a valid partition of the graph into contiguous districts.
+
+- **Turn On Edges**: Randomly activate edges between nodes (precincts) with a small probability \( q \) and gather connected components.
+
+- **Boundary Identification**: Identify all connected components along the boundaries of districts using BFS.
+
+- **Select Components for Swapping**: Randomly choose a subset of non-adjacent connected components along the boundaries using the Zero-truncated Poisson distribution.
+
+- **Propose Swaps**: Reassign the chosen components to adjacent districts, ensuring districts remain contiguous.
+
+- **Acceptance Check**: Evaluate the proposed swap using an acceptance probability based on the Metropolis-Hastings criterion.
+
+![map_with_graph](https://github.com/user-attachments/assets/7149221e-9de4-45a8-8618-e40fe806798d)
+
+The variations of the MCMC algorithm modify the **Acceptance Check** to handle the **population constraint**:
+
+- **Hard Constraint**: Plans violating the allowed population deviation \( \delta \) are immediately rejected, strictly enforcing the constraint but limiting mixing efficiency due to frequent rejections.
+
+- **Soft Constraint**: Acceptance is adjusted using a Gibbs distribution to favor near-valid plans. Invalid plans assist transitions and are reweighted later with Sampling-Importance Resampling, improving mixing efficiency.
+
+- **Target Distribution**: Plans can be sampled either uniformly from all contiguous districts or using a Gibbs distribution that emphasizes plans with near-equal populations.
+
+
+
+
+## Generative Flow Networks (GFNs)
 
 - https://milayb.notion.site/The-GFlowNet-Tutorial-95434ef0e2d94c24aab90e69b30be9b3
 - https://arxiv.org/abs/2111.09266
